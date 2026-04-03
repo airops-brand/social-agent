@@ -274,7 +274,7 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
     await client.chat.postMessage({
       channel: message.channel,
       thread_ts: message.ts,
-      text: `Hey! Thanks for your nugget. Drafting up a post now, hold tight.`,
+      text: `Hey <@${message.user}>! Thanks for your nugget. Drafting up a post now, hold tight.`,
     });
 
     // 2. Generate drafts
@@ -289,7 +289,7 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
     await client.chat.postMessage({
       channel: message.channel,
       thread_ts: message.ts,
-      text: `Your post draft is ready! Take a look and give me a thumbs up when approved: ${notionUrl}`,
+      text: `<@${message.user}> Your post draft is ready! Take a look and give me a thumbs up when approved: ${notionUrl}`,
     });
 
     // 5. DM reviewer
