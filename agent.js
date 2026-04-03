@@ -30,7 +30,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 // ─── Config ────────────────────────────────────────────────────────────────
 
 const REVIEWER_SLACK_ID = 'U09K60X677C'; // Jess
-const NOTION_DATABASE_ID = '5ccd6689-e7f3-41d9-9705-e13c02d1435a'; // Nuggets data source
+const NOTION_DATABASE_ID = '4c781e94ccc3456bbeef2476526c0dce';
 const NUGGETS_CHANNEL_NAME = '0-nuggets'; // channel to watch (without #)
 
 // Regex that catches: "post idea", "post-idea", "#post-idea", "post_idea" — case insensitive
