@@ -274,15 +274,29 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
   console.log(`[nuggets-agent] Post idea detected: "${postIdea.slice(0, 80)}..."`);
 
   try {
-    // 1. Generate drafts
+    // 1. Acknowledge in thread
+    await client.chat.postMessage({
+      channel: message.channel,
+      thread_ts: message.ts,
+      text: `Hey! Thanks for your nugget. Drafting up a post now, hold tight.`,
+    });
+
+    // 2. Generate drafts
     const { title, linkedin_post, blog_draft } = await generateDrafts(postIdea);
     console.log(`[nuggets-agent] Drafts generated. Title: "${title}"`);
 
-    // 2. Create Notion page
+    // 3. Create Notion page
     const notionUrl = await createNotionPage(title, linkedin_post, blog_draft, postIdea);
     console.log(`[nuggets-agent] Notion page created: ${notionUrl}`);
 
-    // 3. DM reviewer
+    // 4. Follow up in thread with the link
+    await client.chat.postMessage({
+      channel: message.channel,
+      thread_ts: message.ts,
+      text: `Your post draft is ready! Take a look and give me a thumbs up when approved: ${notionUrl}`,
+    });
+
+    // 5. DM reviewer
     await sendReviewDM(notionUrl, postIdea, message.channel, message.ts);
     console.log(`[nuggets-agent] DM sent to reviewer.`);
 
