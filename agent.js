@@ -16,6 +16,13 @@
  */
 
 require('dotenv').config();
+
+console.log('[startup] SLACK_BOT_TOKEN set:', !!process.env.SLACK_BOT_TOKEN);
+console.log('[startup] SLACK_SIGNING_SECRET set:', !!process.env.SLACK_SIGNING_SECRET);
+console.log('[startup] SLACK_APP_TOKEN set:', !!process.env.SLACK_APP_TOKEN);
+console.log('[startup] NOTION_TOKEN set:', !!process.env.NOTION_TOKEN);
+console.log('[startup] ANTHROPIC_API_KEY set:', !!process.env.ANTHROPIC_API_KEY);
+
 const { App } = require('@slack/bolt');
 const { Client: NotionClient } = require('@notionhq/client');
 const Anthropic = require('@anthropic-ai/sdk');
