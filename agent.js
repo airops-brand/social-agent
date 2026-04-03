@@ -30,7 +30,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 // ─── Config ────────────────────────────────────────────────────────────────
 
 const REVIEWER_SLACK_ID = 'U09K60X677C'; // Jess
-const NOTION_DATABASE_ID = '4c781e94ccc3456bbeef2476526c0dce';
+const NOTION_PAGE_ID = '3371f419db8a810ab58addb600085f6c';
 const NUGGETS_CHANNEL_NAME = '0-nuggets'; // channel to watch (without #)
 
 // Regex that catches: "post idea", "post-idea", "#post-idea", "post_idea" — case insensitive
@@ -165,73 +165,69 @@ function textToBlocks(text) {
   return chunks;
 }
 
-// ─── Core: create Notion page ───────────────────────────────────────────────
+// ─── Core: append drafts to Notion page as a toggle heading ─────────────────
 
-async function createNotionPage(title, linkedinPost, blogDraft, originalMessage) {
-  const today = new Date().toISOString().split('T')[0];
+async function appendToNotionPage(title, linkedinPost, blogDraft, originalMessage) {
+  const today = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
-  const response = await notion.pages.create({
-    parent: { database_id: NOTION_DATABASE_ID },
-    properties: {
-      Name: {
-        title: [{ text: { content: title } }],
-      },
-      Status: {
-        select: { name: 'Draft' },
-      },
-      Topic: {
-        rich_text: [{ text: { content: originalMessage.slice(0, 200) } }],
-      },
-      'Date added': {
-        date: { start: today },
-      },
-    },
+  // Create a toggle heading with the date and title, containing the drafts inside
+  await notion.blocks.children.append({
+    block_id: NOTION_PAGE_ID,
     children: [
       {
         object: 'block',
         type: 'heading_2',
         heading_2: {
-          rich_text: [{ type: 'text', text: { content: 'Original nugget' } }],
+          is_toggleable: true,
+          rich_text: [{ type: 'text', text: { content: `${today} - ${title}` } }],
+          children: [
+            {
+              object: 'block',
+              type: 'heading_3',
+              heading_3: {
+                rich_text: [{ type: 'text', text: { content: 'Original nugget' } }],
+              },
+            },
+            {
+              object: 'block',
+              type: 'quote',
+              quote: {
+                rich_text: [{ type: 'text', text: { content: originalMessage.slice(0, 2000) } }],
+              },
+            },
+            {
+              object: 'block',
+              type: 'divider',
+              divider: {},
+            },
+            {
+              object: 'block',
+              type: 'heading_3',
+              heading_3: {
+                rich_text: [{ type: 'text', text: { content: 'LinkedIn post draft' } }],
+              },
+            },
+            ...textToBlocks(linkedinPost),
+            {
+              object: 'block',
+              type: 'divider',
+              divider: {},
+            },
+            {
+              object: 'block',
+              type: 'heading_3',
+              heading_3: {
+                rich_text: [{ type: 'text', text: { content: 'Blog draft' } }],
+              },
+            },
+            ...textToBlocks(blogDraft),
+          ],
         },
       },
-      {
-        object: 'block',
-        type: 'quote',
-        quote: {
-          rich_text: [{ type: 'text', text: { content: originalMessage.slice(0, 2000) } }],
-        },
-      },
-      {
-        object: 'block',
-        type: 'divider',
-        divider: {},
-      },
-      {
-        object: 'block',
-        type: 'heading_2',
-        heading_2: {
-          rich_text: [{ type: 'text', text: { content: 'LinkedIn post draft' } }],
-        },
-      },
-      ...textToBlocks(linkedinPost),
-      {
-        object: 'block',
-        type: 'divider',
-        divider: {},
-      },
-      {
-        object: 'block',
-        type: 'heading_2',
-        heading_2: {
-          rich_text: [{ type: 'text', text: { content: 'Blog draft' } }],
-        },
-      },
-      ...textToBlocks(blogDraft),
     ],
   });
 
-  const pageId = response.id.replace(/-/g, '');
-  const notionUrl = `https://www.notion.so/${pageId}`;
+  const notionUrl = `https://www.notion.so/${NOTION_PAGE_ID.replace(/-/g, '')}`;
   return notionUrl;
 }
 
@@ -286,7 +282,7 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
     console.log(`[nuggets-agent] Drafts generated. Title: "${title}"`);
 
     // 3. Create Notion page
-    const notionUrl = await createNotionPage(title, linkedin_post, blog_draft, postIdea);
+    const notionUrl = await appendToNotionPage(title, linkedin_post, blog_draft, postIdea);
     console.log(`[nuggets-agent] Notion page created: ${notionUrl}`);
 
     // 4. Follow up in thread with the link
