@@ -149,6 +149,22 @@ async function generateDrafts(postIdea) {
   return JSON.parse(clean);
 }
 
+// ─── Helper: split text into Notion paragraph blocks (max 2000 chars each) ──
+
+function textToBlocks(text) {
+  const chunks = [];
+  for (let i = 0; i < text.length; i += 2000) {
+    chunks.push({
+      object: 'block',
+      type: 'paragraph',
+      paragraph: {
+        rich_text: [{ type: 'text', text: { content: text.slice(i, i + 2000) } }],
+      },
+    });
+  }
+  return chunks;
+}
+
 // ─── Core: create Notion page ───────────────────────────────────────────────
 
 async function createNotionPage(title, linkedinPost, blogDraft, originalMessage) {
@@ -182,7 +198,7 @@ async function createNotionPage(title, linkedinPost, blogDraft, originalMessage)
         object: 'block',
         type: 'quote',
         quote: {
-          rich_text: [{ type: 'text', text: { content: originalMessage } }],
+          rich_text: [{ type: 'text', text: { content: originalMessage.slice(0, 2000) } }],
         },
       },
       {
@@ -197,13 +213,7 @@ async function createNotionPage(title, linkedinPost, blogDraft, originalMessage)
           rich_text: [{ type: 'text', text: { content: 'LinkedIn post draft' } }],
         },
       },
-      {
-        object: 'block',
-        type: 'paragraph',
-        paragraph: {
-          rich_text: [{ type: 'text', text: { content: linkedinPost } }],
-        },
-      },
+      ...textToBlocks(linkedinPost),
       {
         object: 'block',
         type: 'divider',
@@ -216,13 +226,7 @@ async function createNotionPage(title, linkedinPost, blogDraft, originalMessage)
           rich_text: [{ type: 'text', text: { content: 'Blog draft' } }],
         },
       },
-      {
-        object: 'block',
-        type: 'paragraph',
-        paragraph: {
-          rich_text: [{ type: 'text', text: { content: blogDraft } }],
-        },
-      },
+      ...textToBlocks(blogDraft),
     ],
   });
 
