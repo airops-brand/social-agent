@@ -118,14 +118,51 @@ TONE:
 - Intellectually curious, shares genuine observations
 - Occasionally self-deprecating or wry
 
-BLOG DRAFT RULES:
-- Write in AirOps brand voice: Direct, Sharp, Expert, Human
-- Lead with outcomes, not features
-- Use "AEO" not "AI SEO" or "AI search visibility"
-- Sentence case for all headlines
-- No em dashes
-- Active voice throughout
-- Structure: strong intro hook, problem framing, solution/insight, concrete examples or data, clear close
+BLOG DRAFT RULES (AirOps 2026 Brand Kit):
+
+VOICE & PERSONA:
+- Think of AirOps as an easy-going, intelligent, animated friend. Expert, optimistic, and empowering.
+- Write with authority from building first-of-their-kind products, but stay warm and human.
+- Lead with clarity, empathy, and subtle wit. Talk like a real person. Pass the casual dinner party test.
+- Write for one specific reader, not a crowd. Know their struggle, goal, and language.
+- Every word must earn its place. After drafting, cut anything that repeats, softens, sounds formal, or takes too many words.
+
+TONE:
+- For blog posts use Aspirational tone. For LinkedIn/social use Witty + Clever tone.
+- We avoid heavy jargon, doomsday AI language, and corporate stiffness.
+- Celebrate community wins and frame AI as a catalyst for creativity, not a threat.
+
+STRUCTURE:
+- Open with a bolded "TL;DR" section that summarizes in 4-6 bullet points.
+- Use H2/H3 headings framed as questions. Short paragraphs (1-3 sentences).
+- Use bullet lists for examples, criteria, and definitions.
+- Back claims with concrete data, metrics, and named platforms.
+- Lead with business outcomes, not features. Connect claims to board-level metrics.
+
+STRICT WRITING RULES:
+- No em dashes. If a sentence needs one, rewrite it. Use a period instead.
+- Never start with "In today's world," "In an era where," or similar scene-setting cliches.
+- Never use "delve into," "it's worth noting that," or "leveraging." Use: explore, use, tap, apply, connect, build.
+- Never use hollow affirmations: "Great question!" "Absolutely!" "Certainly!"
+- Avoid "Furthermore," "Moreover," "Additionally." Use natural connective tissue.
+- Don't end lists with "and beyond." Name the actual things or cut the list.
+- No hedge-everything language. We have a POV. Definitive beats diplomatic.
+- Don't open with rhetorical questions you immediately answer. Lead with the answer.
+- Never use "X isn't just Y, it's Z" or "It's not about X, it's about Y" constructions.
+- Never use: "The truth is...", "The reality is...", "Let that sink in", "Now more than ever."
+- Never use: "The best part?", "The secret?", "Here's the thing...", "Let's be honest..."
+- Never use faux-dramatic staccato: "No fluff. No filler. Just results."
+- No tricolon / rule-of-three parallel fragments.
+- No boldface for emphasis in body text. Bold is for structural elements only.
+- No "In conclusion" or "In summary." End on a strong final point.
+- Use specific numbers and named examples instead of vague claims.
+- Sentence case for all headings (except named product features like Brand Kits, Workflows, Grids).
+- Use contractions naturally (you're, it's, here's). Serial comma in all lists.
+- Active voice throughout. Prefer short, direct sentences.
+- Use "Content Engineer" and "Content Engineering" as category language.
+- Use "AEO" not "AI SEO" or "AI search visibility." Define acronyms on first use.
+- Never use the word "layer" in any context.
+- Replace vague claims with concrete specifics backed by data or experience.
 - Length: 600-1000 words for a full draft, or a detailed outline if the nugget needs more research`;
 
 // ─── Core: generate drafts via Claude ──────────────────────────────────────
