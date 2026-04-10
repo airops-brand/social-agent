@@ -30,8 +30,23 @@ const Anthropic = require('@anthropic-ai/sdk');
 // ─── Config ────────────────────────────────────────────────────────────────
 
 const REVIEWER_SLACK_ID = 'U09K60X677C'; // Jess
-const NOTION_PAGE_ID = '3371f419db8a810ab58addb600085f6c';
-const NUGGETS_CHANNEL_NAME = '0-nuggets'; // channel to watch (without #)
+const DEFAULT_NOTION_PAGE_ID = '3371f419db8a810ab58addb600085f6c'; // Nuggets (default)
+const WATCH_CHANNELS = (process.env.WATCH_CHANNELS || '0-nuggets')
+  .split(',')
+  .map((c) => c.trim().replace(/^#/, ''));
+const ORDINAL_API_KEY = process.env.ORDINAL_API_KEY;
+const ORDINAL_LINKEDIN_PROFILE_ID = process.env.ORDINAL_LINKEDIN_PROFILE_ID || 'a68df3c6-0870-45d0-adfc-a9b3d9917557'; // AirOps
+
+// Channel → Notion page overrides (format: "channel:pageId,channel:pageId")
+const CHANNEL_NOTION_MAP = {};
+(process.env.CHANNEL_NOTION_MAP || '').split(',').filter(Boolean).forEach((entry) => {
+  const [ch, pageId] = entry.split(':').map((s) => s.trim());
+  CHANNEL_NOTION_MAP[ch.replace(/^#/, '')] = pageId;
+});
+
+function getNotionPageId(channelName) {
+  return CHANNEL_NOTION_MAP[channelName] || DEFAULT_NOTION_PAGE_ID;
+}
 
 // Regex that catches: "post idea", "post-idea", "#post-idea", "post_idea" — case insensitive
 const POST_IDEA_REGEX = /post[\s\-_#]*idea/i;
@@ -204,12 +219,12 @@ function textToBlocks(text) {
 
 // ─── Core: append drafts to Notion page as a toggle heading ─────────────────
 
-async function appendToNotionPage(title, linkedinPost, blogDraft, originalMessage) {
+async function appendToNotionPage(title, linkedinPost, blogDraft, originalMessage, pageId) {
   const today = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
   // Create a toggle heading with the date and title, containing the drafts inside
   await notion.blocks.children.append({
-    block_id: NOTION_PAGE_ID,
+    block_id: pageId,
     children: [
       {
         object: 'block',
@@ -264,18 +279,47 @@ async function appendToNotionPage(title, linkedinPost, blogDraft, originalMessag
     ],
   });
 
-  const notionUrl = `https://www.notion.so/${NOTION_PAGE_ID.replace(/-/g, '')}`;
+  const notionUrl = `https://www.notion.so/${pageId.replace(/-/g, '')}`;
   return notionUrl;
+}
+
+// ─── Core: queue LinkedIn post in Ordinal ─────────────────────────────────
+
+async function queueOrdinalPost(title, linkedinPost) {
+  const res = await fetch('https://app.tryordinal.com/api/posts', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${ORDINAL_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title,
+      publishAt: new Date().toISOString(),
+      status: 'Finalized',
+      linkedIn: {
+        profileId: ORDINAL_LINKEDIN_PROFILE_ID,
+        copy: linkedinPost,
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Ordinal API error ${res.status}: ${body}`);
+  }
+
+  const post = await res.json();
+  return post.id;
 }
 
 // ─── Core: send DM to reviewer ──────────────────────────────────────────────
 
-async function sendReviewDM(notionUrl, originalMessage, originalChannelId, originalMessageTs) {
+async function sendReviewDM(notionUrl, originalMessage, originalChannelId, originalMessageTs, channelName, drafts) {
   const preview = originalMessage.slice(0, 120) + (originalMessage.length > 120 ? '...' : '');
 
   const result = await slack.client.chat.postMessage({
     channel: REVIEWER_SLACK_ID,
-    text: `*New post idea ready for review* 👀\n\n*Original nugget:*\n> ${preview}\n\n*Drafts in Notion:* ${notionUrl}\n\nReply *approved* to this message to post the link back in #0-nuggets.`,
+    text: `*New post idea ready for review* 👀\n\n*Original nugget:*\n> ${preview}\n\n*Drafts in Notion:* ${notionUrl}\n\nReply *approved* to this message to post the link back in #${channelName}.`,
   });
 
   // Store state so we can act on the "approved" reply
@@ -283,28 +327,32 @@ async function sendReviewDM(notionUrl, originalMessage, originalChannelId, origi
     originalChannelId,
     originalMessageTs,
     notionUrl,
+    channelName,
+    drafts,
     dmChannelId: result.channel,
   });
 
   return result.ts;
 }
 
-// ─── Slack event: message in #0-nuggets ────────────────────────────────────
+// ─── Slack event: message in watched channels ────────────────────────────────
 
 slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
-  // Ignore bot messages and messages already in threads
   if (message.bot_id || message.subtype) return;
+  if (message.channel_type === 'im') return; // DMs handled separately
 
-  // Confirm we're in the right channel
+  // Confirm we're in a watched channel
+  let channelName = 'unknown';
   try {
     const info = await client.conversations.info({ channel: message.channel });
-    if (info.channel?.name !== NUGGETS_CHANNEL_NAME) return;
+    channelName = info.channel?.name || 'unknown';
+    if (!WATCH_CHANNELS.includes(channelName)) return;
   } catch {
-    // If we can't verify channel name, proceed anyway
+    return;
   }
 
   const postIdea = message.text;
-  console.log(`[nuggets-agent] Post idea detected: "${postIdea.slice(0, 80)}..."`);
+  console.log(`[nuggets-agent] Post idea detected in #${channelName}: "${postIdea.slice(0, 80)}..."`);
 
   try {
     // 1. Acknowledge in thread
@@ -315,12 +363,13 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
     });
 
     // 2. Generate drafts
-    const { title, linkedin_post, blog_draft } = await generateDrafts(postIdea);
-    console.log(`[nuggets-agent] Drafts generated. Title: "${title}"`);
+    const drafts = await generateDrafts(postIdea);
+    console.log(`[nuggets-agent] Drafts generated. Title: "${drafts.title}"`);
 
-    // 3. Create Notion page
-    const notionUrl = await appendToNotionPage(title, linkedin_post, blog_draft, postIdea);
-    console.log(`[nuggets-agent] Notion page created: ${notionUrl}`);
+    // 3. Append to Notion page
+    const pageId = getNotionPageId(channelName);
+    const notionUrl = await appendToNotionPage(drafts.title, drafts.linkedin_post, drafts.blog_draft, postIdea, pageId);
+    console.log(`[nuggets-agent] Notion page updated: ${notionUrl}`);
 
     // 4. Follow up in thread with the link
     await client.chat.postMessage({
@@ -330,29 +379,84 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
     });
 
     // 5. DM reviewer
-    await sendReviewDM(notionUrl, postIdea, message.channel, message.ts);
+    await sendReviewDM(notionUrl, postIdea, message.channel, message.ts, channelName, drafts);
     console.log(`[nuggets-agent] DM sent to reviewer.`);
-
   } catch (err) {
     console.error('[nuggets-agent] Error processing post idea:', err);
   }
 });
 
-// ─── Slack event: DM reply — check for "approved" ──────────────────────────
+// ─── Slack event: DM with a post idea ─────────────────────────────────────
 
 slack.message(async ({ message, client }) => {
-  // Only care about DMs from the reviewer
   if (message.bot_id || message.subtype) return;
   if (message.channel_type !== 'im') return;
-  if (message.user !== REVIEWER_SLACK_ID) return;
 
-  const text = (message.text || '').trim().toLowerCase();
-  if (!text.includes('approved')) return;
+  const text = (message.text || '').trim();
 
-  // Find the pending approval this reply belongs to
-  // The DM reply will be in a thread off our bot message, or a standalone message
+  // If this is the reviewer saying "approved", handle that instead
+  if (message.user === REVIEWER_SLACK_ID && text.toLowerCase().includes('approved')) {
+    return handleApproval(message, client);
+  }
+
+  // Treat any other DM as a post idea
+  const postIdea = text;
+  if (!postIdea) return;
+
+  console.log(`[nuggets-agent] Post idea via DM from ${message.user}: "${postIdea.slice(0, 80)}..."`);
+
+  try {
+    await client.chat.postMessage({
+      channel: message.channel,
+      thread_ts: message.ts,
+      text: 'Got it, generating drafts...',
+    });
+
+    const drafts = await generateDrafts(postIdea);
+    console.log(`[nuggets-agent] Drafts generated. Title: "${drafts.title}"`);
+
+    const notionUrl = await appendToNotionPage(drafts.title, drafts.linkedin_post, drafts.blog_draft, postIdea, DEFAULT_NOTION_PAGE_ID);
+    console.log(`[nuggets-agent] Notion page updated: ${notionUrl}`);
+
+    await client.chat.postMessage({
+      channel: message.channel,
+      thread_ts: message.ts,
+      text: `Drafts are ready: ${notionUrl}`,
+    });
+
+    // Also send to reviewer for approval
+    const preview = postIdea.slice(0, 120) + (postIdea.length > 120 ? '...' : '');
+    const result = await slack.client.chat.postMessage({
+      channel: REVIEWER_SLACK_ID,
+      text: `*New post idea ready for review* 👀\n\n*Submitted via DM by <@${message.user}>*\n\n*Original nugget:*\n> ${preview}\n\n*Drafts in Notion:* ${notionUrl}\n\nReply *approved* to this message to notify them.`,
+    });
+
+    pendingApprovals.set(result.ts, {
+      originalChannelId: message.channel,
+      originalMessageTs: message.ts,
+      notionUrl,
+      channelName: null,
+      submitterUserId: message.user,
+      drafts,
+      dmChannelId: result.channel,
+    });
+
+    console.log(`[nuggets-agent] DM sent to reviewer.`);
+  } catch (err) {
+    console.error('[nuggets-agent] Error processing DM post idea:', err);
+    await client.chat.postMessage({
+      channel: message.channel,
+      thread_ts: message.ts,
+      text: 'Something went wrong generating drafts. Please try again.',
+    });
+  }
+});
+
+// ─── Approval handler ─────────────────────────────────────────────────────
+
+async function handleApproval(message, client) {
   const threadTs = message.thread_ts || null;
-  
+
   let approval = null;
   let approvalKey = null;
 
@@ -360,7 +464,6 @@ slack.message(async ({ message, client }) => {
     approval = pendingApprovals.get(threadTs);
     approvalKey = threadTs;
   } else {
-    // Fall back: find most recent pending approval in this DM channel
     for (const [key, val] of pendingApprovals.entries()) {
       if (val.dmChannelId === message.channel) {
         approval = val;
@@ -376,28 +479,54 @@ slack.message(async ({ message, client }) => {
   }
 
   try {
-    // Post Notion link as a thread reply to the original #0-nuggets message
-    await client.chat.postMessage({
-      channel: approval.originalChannelId,
-      thread_ts: approval.originalMessageTs,
-      text: `Drafts are ready in Notion: ${approval.notionUrl}`,
-    });
+    // Queue the LinkedIn post in Ordinal
+    let ordinalNote = '';
+    if (ORDINAL_API_KEY && approval.drafts) {
+      try {
+        const ordinalId = await queueOrdinalPost(approval.drafts.title, approval.drafts.linkedin_post);
+        console.log(`[nuggets-agent] Queued in Ordinal: ${ordinalId}`);
+        ordinalNote = '\nLinkedIn post queued in Ordinal.';
+      } catch (err) {
+        console.error('[nuggets-agent] Ordinal error (non-blocking):', err.message);
+        ordinalNote = '\n⚠️ Failed to queue in Ordinal.';
+      }
+    }
 
-    // Clean up
+    if (approval.channelName) {
+      await client.chat.postMessage({
+        channel: approval.originalChannelId,
+        thread_ts: approval.originalMessageTs,
+        text: `Drafts are ready in Notion: ${approval.notionUrl}`,
+      });
+
+      await client.chat.postMessage({
+        channel: REVIEWER_SLACK_ID,
+        thread_ts: threadTs || undefined,
+        text: `Done! Link posted to #${approval.channelName} 👍${ordinalNote}`,
+      });
+
+      console.log(`[nuggets-agent] Posted Notion link to #${approval.channelName} thread.`);
+    } else {
+      await client.chat.postMessage({
+        channel: approval.originalChannelId,
+        thread_ts: approval.originalMessageTs,
+        text: `Your post idea has been approved! 🎉 Notion link: ${approval.notionUrl}`,
+      });
+
+      await client.chat.postMessage({
+        channel: REVIEWER_SLACK_ID,
+        thread_ts: threadTs || undefined,
+        text: `Done! <@${approval.submitterUserId}> has been notified 👍${ordinalNote}`,
+      });
+
+      console.log(`[nuggets-agent] Notified DM submitter ${approval.submitterUserId}.`);
+    }
+
     pendingApprovals.delete(approvalKey);
-    console.log(`[nuggets-agent] Posted Notion link to #0-nuggets thread.`);
-
-    // Confirm to reviewer
-    await client.chat.postMessage({
-      channel: REVIEWER_SLACK_ID,
-      thread_ts: threadTs || undefined,
-      text: `Done! Link posted to #${NUGGETS_CHANNEL_NAME} 👍`,
-    });
-
   } catch (err) {
     console.error('[nuggets-agent] Error posting approved link:', err);
   }
-});
+}
 
 // ─── Start ──────────────────────────────────────────────────────────────────
 
