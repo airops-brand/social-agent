@@ -130,8 +130,8 @@ function parseFormSubmission(text) {
   let currentValue = [];
 
   for (const line of lines) {
-    // Match bold field labels like "*Topic:*" or "*Topic*"
-    const fieldMatch = line.match(/^\*([^*]+?):?\*\s*(.*)/);
+    // Match bold field labels: *Field:* or **Field:** or *Field* or **Field**
+    const fieldMatch = line.match(/^\*{1,2}([^*]+?):?\*{1,2}\s*(.*)/);
     if (fieldMatch) {
       if (currentField) {
         fields[currentField] = currentValue.join('\n').trim();
@@ -147,27 +147,28 @@ function parseFormSubmission(text) {
     fields[currentField] = currentValue.join('\n').trim();
   }
 
+  console.log('[nuggets-agent] Parsed form fields:', JSON.stringify(fields));
   return fields;
 }
 
 function buildFormPrompt(fields) {
-  let prompt = `Here is a social post request from the team:\n\n`;
-  prompt += `Topic: ${fields.topic || fields['post topic'] || 'Not specified'}\n`;
-
+  const topic = fields["what is the post's topic"] || fields.topic || fields['post topic'] || '';
   const postType = fields['post type'] || fields.type || '';
-  if (postType) prompt += `Post type: ${postType}\n`;
-
-  const context = fields.context || fields.brief || fields['context / brief'] || '';
-  if (context) prompt += `\nAdditional context:\n${context}\n`;
-
-  const audience = fields.audience || fields['target audience'] || '';
-  if (audience) prompt += `Target audience: ${audience}\n`;
-
-  // Extract any Notion URLs from all field values
-  const allText = Object.values(fields).join(' ');
+  const context = fields['context / brief'] || fields.context || fields.brief || '';
+  const audience = fields['target audience'] || fields.audience || '';
+  const imageDesc = fields["if you don't already have a post image"] || fields['image description'] || '';
   const notionLink = fields['notion link'] || fields['notion url'] || '';
 
-  prompt += '\nPlease write the LinkedIn post and blog draft. Return only valid JSON, no markdown fences, no preamble.';
+  let prompt = 'Write a LinkedIn post based on this request:\n\n';
+  if (topic) prompt += `TOPIC: ${topic}\n`;
+  if (postType) prompt += `POST TYPE: ${postType}\n`;
+  if (context) prompt += `CONTEXT: ${context}\n`;
+  if (audience) prompt += `TARGET AUDIENCE: ${audience}\n`;
+  if (imageDesc) prompt += `IMAGE NOTES: ${imageDesc}\n`;
+
+  const allText = Object.values(fields).join(' ') + ' ' + notionLink;
+
+  prompt += '\nPlease write the LinkedIn post and blog draft based on the above. Return only valid JSON, no markdown fences, no preamble.';
   return { prompt, notionLink, allText };
 }
 
@@ -693,8 +694,12 @@ slack.event('message', async ({ event, client }) => {
     console.log(`[nuggets-agent] Drafts generated. Title: "${drafts.title}"`);
 
     // 4. Append to Notion page
+    const topic = fields["what is the post's topic"] || fields.topic || fields['post topic'] || 'Untitled';
+    const context = fields['context / brief'] || fields.context || '';
+    const originalSummary = context ? `${topic}: ${context}` : topic;
+
     const pageId = getNotionPageId(channelName);
-    const notionUrl = await appendToNotionPage(drafts.title, drafts.linkedin_post, drafts.blog_draft, message.text, pageId);
+    const notionUrl = await appendToNotionPage(drafts.title, drafts.linkedin_post, drafts.blog_draft, originalSummary, pageId);
     console.log(`[nuggets-agent] Notion page updated: ${notionUrl}`);
 
     // 5. Follow up in thread
@@ -705,7 +710,7 @@ slack.event('message', async ({ event, client }) => {
     });
 
     // 6. DM reviewer
-    const dmTs = await sendReviewDM(notionUrl, fields.topic || fields["what is the post's topic"] || message.text, message.channel, message.ts, channelName, drafts);
+    const dmTs = await sendReviewDM(notionUrl, originalSummary, message.channel, message.ts, channelName, drafts);
     console.log(`[nuggets-agent] DM sent to reviewer.`);
 
     // Store image URLs on the pending approval for Ordinal upload on approve
