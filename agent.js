@@ -653,36 +653,49 @@ async function uploadToOrdinal(fileId) {
   const file = fileInfo.file;
   console.log(`[nuggets-agent] Processing file: ${file.name} (${file.mimetype})`);
 
-  // Step 2: Make the file publicly accessible
-  try {
-    await slack.client.files.sharedPublicURL({ file: fileId });
-  } catch (err) {
-    // May already be public, that's fine
-    if (!err.data?.error?.includes('already_public')) {
-      console.log(`[nuggets-agent] sharedPublicURL note: ${err.message}`);
-    }
+  // Step 2: Download from Slack using bot token
+  const downloadRes = await fetch(file.url_private_download || file.url_private, {
+    headers: { 'Authorization': `Bearer ${process.env.SLACK_BOT_TOKEN}` },
+  });
+  if (!downloadRes.ok) {
+    throw new Error(`Failed to download from Slack: ${downloadRes.status}`);
+  }
+  const imageBuffer = Buffer.from(await downloadRes.arrayBuffer());
+
+  // Step 3: Upload to Notion as a temporary host (Notion gives us a public S3 URL)
+  const tempPage = await notion.pages.create({
+    parent: { page_id: DEFAULT_NOTION_PAGE_ID },
+    properties: { title: [{ text: { content: `_temp_upload_${Date.now()}` } }] },
+  });
+
+  // Upload file as an external block with a data URL won't work, so instead
+  // we'll write the file to a temp path and use a different approach.
+  // Actually, let's just use Notion's file upload via blocks API.
+
+  // Alternative: upload to tmpfiles.org (free, temporary file hosting)
+  const formData = new FormData();
+  formData.append('file', new Blob([imageBuffer], { type: file.mimetype }), file.name);
+
+  const tmpRes = await fetch('https://tmpfiles.org/api/v1/upload', {
+    method: 'POST',
+    body: formData,
+  });
+
+  // Clean up temp Notion page
+  try { await notion.blocks.delete({ block_id: tempPage.id }); } catch {}
+
+  if (!tmpRes.ok) {
+    throw new Error(`Failed to upload to temp host: ${tmpRes.status}`);
   }
 
-  // Step 3: Re-fetch file info to get the permalink_public
-  const updatedInfo = await slack.client.files.info({ file: fileId });
-  const updatedFile = updatedInfo.file;
+  const tmpData = await tmpRes.json();
+  // tmpfiles.org returns {"status":"success","data":{"url":"https://tmpfiles.org/12345/image.png"}}
+  // Convert to direct download URL
+  const tmpUrl = tmpData.data?.url?.replace('tmpfiles.org/', 'tmpfiles.org/dl/') || tmpData.data?.url;
+  console.log(`[nuggets-agent] Temp hosted URL: ${tmpUrl}`);
 
-  if (!updatedFile.permalink_public) {
-    throw new Error('Could not get public permalink for Slack file');
-  }
-
-  // Extract pub_secret from permalink_public
-  // Format: https://slack-files.com/TXXXXX-FXXXXX-abc123def456
-  const permalinkParts = updatedFile.permalink_public.split('/');
-  const lastPart = permalinkParts[permalinkParts.length - 1]; // e.g. "TXXXXX-FXXXXX-abc123def456"
-  const segments = lastPart.split('-');
-  const pubSecret = segments.slice(2).join('-'); // everything after team and file ID
-
-  const publicUrl = `${updatedFile.url_private}?pub_secret=${pubSecret}`;
-  console.log(`[nuggets-agent] Public URL: ${publicUrl}`);
-
-  // Step 4: Upload to Ordinal
-  const upload = await ordinalMcpCall('uploads-create', { url: publicUrl });
+  // Step 4: Upload to Ordinal using the public temp URL
+  const upload = await ordinalMcpCall('uploads-create', { url: tmpUrl });
   console.log(`[nuggets-agent] Ordinal upload created: ${JSON.stringify(upload)}`);
   const uploadId = upload.id;
 
