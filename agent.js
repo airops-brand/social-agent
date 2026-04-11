@@ -1017,10 +1017,11 @@ To get started, just send me a post idea!`,
       if (doc) notionContext.push(doc);
     }
 
-    const drafts = await generateDrafts(postIdea, ALEX_SYSTEM_PROMPT, notionContext);
+    const drafts = await generateDrafts(postIdea, AIROPS_BRAND_SYSTEM_PROMPT, notionContext);
     console.log(`[nuggets-agent] Drafts generated. Title: "${drafts.title}"`);
 
-    const notionUrl = await appendToNotionPage(drafts.title, drafts.linkedin_post, drafts.blog_draft, postIdea, DEFAULT_NOTION_PAGE_ID);
+    const DM_NOTION_PAGE_ID = process.env.DM_NOTION_PAGE_ID || '33b1f419db8a8032aed0f980166410d2';
+    const notionUrl = await appendToNotionPage(drafts.title, drafts.linkedin_post, drafts.blog_draft, postIdea, DM_NOTION_PAGE_ID);
     console.log(`[nuggets-agent] Notion page updated: ${notionUrl}`);
 
     await client.chat.postMessage({
