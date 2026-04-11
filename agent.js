@@ -55,7 +55,7 @@ const POST_IDEA_REGEX = /post[\s\-_#]*idea/i;
 const NOTION_URL_REGEX = /https?:\/\/(?:www\.)?notion\.(?:so|site)\/(?:[^\/]+\/)?([a-f0-9]{32}|[a-f0-9-]{36})/gi;
 
 // Marker that identifies a Workflow Builder form submission
-const FORM_MARKER = '📋 social post request';
+const FORM_MARKER = 'social post request';
 
 // Valid post types for the form dropdown
 const POST_TYPES = ['product launch', 'research / data', 'event / activation', 'thought leadership', 'customer story', 'cultural / team'];
