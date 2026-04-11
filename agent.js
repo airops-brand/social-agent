@@ -1489,9 +1489,56 @@ async function handleApproval(message, client) {
   }
 }
 
+// ─── Google News RSS ──────────────────────────────────────────────────────
+
+const NEWS_TOPICS = [
+  'brand',
+  'design',
+  'brand AI',
+  'AEO answer engine optimization',
+  'AI search',
+  'tech',
+  'design business',
+  'advertising',
+  'advertising AI',
+  'marketing AI',
+];
+
+async function fetchNewsHeadlines() {
+  const allHeadlines = [];
+
+  for (const topic of NEWS_TOPICS) {
+    try {
+      const url = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-US&gl=US&ceid=US:en&when=1d`;
+      const res = await fetch(url);
+      if (!res.ok) continue;
+
+      const xml = await res.text();
+      // Extract titles from RSS XML
+      const titles = [];
+      const regex = /<item>[\s\S]*?<title>(.*?)<\/title>/g;
+      let match;
+      while ((match = regex.exec(xml)) !== null && titles.length < 3) {
+        const title = match[1].replace(/<!\[CDATA\[|\]\]>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
+        titles.push(title);
+      }
+
+      if (titles.length > 0) {
+        allHeadlines.push({ topic, headlines: titles });
+      }
+    } catch (err) {
+      console.error(`[nuggets-agent] News fetch failed for "${topic}":`, err.message);
+    }
+  }
+
+  return allHeadlines;
+}
+
 // ─── Daily post ideas (9am CT) ────────────────────────────────────────────
 
 const DAILY_IDEAS_PROMPT = `You are Edna, the AirOps social content strategist. Generate 5 LinkedIn post ideas for the AirOps brand account and its executives.
+
+You'll receive today's news headlines across brand, design, AI, marketing, and advertising. Use these to inspire timely, relevant post ideas. Not every idea needs to be news-reactive, but at least 2-3 should tie to what's happening right now.
 
 Mix across these categories:
 - AI search and AEO trends (what's changing, what brands should know)
@@ -1499,11 +1546,14 @@ Mix across these categories:
 - Content Engineering as a discipline (practical insights)
 - AirOps product capabilities (tied to outcomes, not features)
 - Marketing leadership hot takes (CMO-level thinking)
+- Design and creative leadership
+- Advertising in the age of AI
 
 For each idea, provide:
 1. A one-line hook (the opening line of the post)
 2. The angle in one sentence
 3. Suggested voice: AirOps Brand, Alex, or Christy
+4. If inspired by a news story, mention which one
 
 Keep it punchy. These are starting points, not finished posts. Be opinionated and specific. No generic topics.`;
 
@@ -1511,12 +1561,28 @@ async function sendDailyIdeas() {
   try {
     console.log('[nuggets-agent] Generating daily post ideas...');
 
+    // Fetch today's news
+    const headlines = await fetchNewsHeadlines();
+    console.log(`[nuggets-agent] Fetched headlines for ${headlines.length} topics`);
+
     // Search docs for any recent product context
     const docsContext = await searchAirOpsDocs('new features launches updates');
 
-    let prompt = 'Generate 5 LinkedIn post ideas for today.';
+    let prompt = 'Generate 5 LinkedIn post ideas for today.\n\n';
+
+    if (headlines.length > 0) {
+      prompt += "TODAY'S NEWS HEADLINES:\n\n";
+      for (const { topic, headlines: titles } of headlines) {
+        prompt += `${topic.toUpperCase()}:\n`;
+        for (const t of titles) {
+          prompt += `- ${t}\n`;
+        }
+        prompt += '\n';
+      }
+    }
+
     if (docsContext) {
-      prompt += `\n\nHere's some recent product context from AirOps docs to inspire ideas:\n${docsContext}`;
+      prompt += `\nRECENT AIROPS PRODUCT CONTEXT:\n${docsContext}`;
     }
 
     const response = await anthropic.messages.create({
