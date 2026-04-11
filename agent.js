@@ -214,6 +214,127 @@ const savedState = loadState();
 const pendingApprovals = new Map(Object.entries(savedState.approvals || {}));
 const reactionApprovalMap = new Map(Object.entries(savedState.reactions || {}));
 
+// DM conversation state: userId → { mode, voice, history[] }
+const dmSessions = new Map();
+
+// Voice options with brand kit content type IDs
+const VOICE_OPTIONS = {
+  airops: { label: 'AirOps Brand', contentTypeId: 23019 },
+  alex: { label: 'Alex Halliday', contentTypeId: 23020 },
+  christy: { label: 'Christy Roach', contentTypeId: 26745 },
+  matt: { label: 'Matt Hammel', contentTypeId: null }, // coming soon
+};
+
+// Cache for fetched voice prompts
+const voicePromptCache = {};
+
+async function fetchVoicePrompt(voiceKey) {
+  if (voicePromptCache[voiceKey]) return voicePromptCache[voiceKey];
+
+  const voice = VOICE_OPTIONS[voiceKey];
+  if (!voice || !voice.contentTypeId) return null;
+
+  // For the AirOps brand, use the hardcoded prompt (it has writing rules too)
+  if (voiceKey === 'airops') {
+    voicePromptCache[voiceKey] = AIROPS_BRAND_SYSTEM_PROMPT;
+    return AIROPS_BRAND_SYSTEM_PROMPT;
+  }
+
+  // For personal voices, fetch template_outline from the brand kit API
+  try {
+    const res = await fetch(`https://app.airops.com/mcp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: Date.now(),
+        method: 'tools/call',
+        params: {
+          name: 'get_brand_kit',
+          arguments: {
+            id: 26564,
+            fields: ['content_types.id', 'content_types.name', 'content_types.template_outline'],
+            includes: ['content_types'],
+          },
+        },
+      }),
+    });
+    // This won't work without auth, so fall back to hardcoded prompts
+  } catch {}
+
+  // Fall back to hardcoded prompts based on the template_outlines we already fetched
+  if (voiceKey === 'alex') {
+    voicePromptCache[voiceKey] = ALEX_SYSTEM_PROMPT;
+    return ALEX_SYSTEM_PROMPT;
+  }
+
+  if (voiceKey === 'christy') {
+    const prompt = buildChristyPrompt();
+    voicePromptCache[voiceKey] = prompt;
+    return prompt;
+  }
+
+  return null;
+}
+
+function buildChristyPrompt() {
+  return `You are a ghostwriting assistant for Christy Roach, CMO at AirOps.
+
+AirOps is a content operations and precision marketing platform focused on AI search performance, Answer Engine Optimization (AEO), and Content Engineering.
+
+Your job is to write two things given a post idea or nugget of information:
+1. A LinkedIn post in Christy's authentic voice
+2. A blog post outline or draft expanding on the same idea
+
+Return your response as valid JSON with this exact shape:
+{
+  "title": "short title summarising the topic (used as Notion page name)",
+  "linkedin_post": "the full linkedin post text",
+  "blog_draft": "the full blog post content in markdown"
+}
+
+CHRISTY'S LINKEDIN VOICE:
+
+TONE: Conversational, confident, and unfiltered. She writes like she's texting a smart friend, not publishing a thought leadership piece. Warmth but zero fluff. Gets to the point and isn't afraid to have an opinion.
+
+SENTENCE STRUCTURE: Short, punchy sentences mixed with longer ones that have a casual, run-on feel. Fragments for emphasis. Rhetorical questions pop up naturally. The rhythm feels spoken, not written.
+
+OPENING HOOKS: Lead with a relatable scenario or a bold claim, never a generic statement. Examples: a cost comparison, a personal habit, or a contrarian take. The first line earns the second line.
+
+SIGNATURE MOVES:
+- Personal anecdotes as proof points. She earns credibility through specificity, not titles.
+- Numbered lists used sparingly, each item gets a mini-argument.
+- Self-aware asides: "Obviously I'm very biased," "Maybe I'm just being grumpy"
+- The pivot: relatable moment → opinion → so here's what I'm doing about it.
+
+WHAT SHE AVOIDS:
+- No jargon-heavy marketing speak
+- No "I'm thrilled to announce"
+- No emoji storms
+- No AI-polished smoothness. She values typos and real voice over perfection.
+- No excessive hedging. When she has a take, she states it.
+
+TOPICS: AI in marketing (practical, not hype), the changing CMO role, in-person connection over remote defaults, doing more with less, authenticity over scale, messy reality of strategy vs. clean frameworks.
+
+CTA STYLE: Soft and genuine. She invites rather than sells. Mentions hiring almost as an afterthought.
+
+VOICE IN ONE LINE: "Smart friend who happens to be a CMO, telling you what's actually working over coffee."
+
+ANTI-PATTERNS:
+- No "at scale," "leverage," "robust," "comprehensive," "seamless"
+- No corporate preambles
+- No emoji as bullet points
+- No inspirational closing platitudes
+- No hype language ("revolutionary," "groundbreaking," "supercharge")
+- No leading with product instead of human experience
+
+BLOG DRAFT RULES:
+- Open with a bolded "TL;DR" section, 4-6 bullet points
+- Use H2/H3 headings framed as questions. Short paragraphs.
+- Lead with business outcomes, not features.
+- No em dashes. Active voice throughout.
+- Length: 600-1000 words for a full draft, or a detailed outline if the nugget needs more research`;
+}
+
 // Channel → system prompt overrides
 const CHANNEL_PROMPT_MAP = {};
 (process.env.CHANNEL_PROMPT_MAP || '').split(',').filter(Boolean).forEach((entry) => {
@@ -962,100 +1083,232 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
   }
 });
 
-// ─── Slack event: DM with a post idea ─────────────────────────────────────
+// ─── Slack event: DM conversations ────────────────────────────────────────
+
+const BRAINSTORM_SYSTEM_PROMPT = `You are Edna, the AirOps social content brainstorming partner. You help marketing teams come up with LinkedIn post ideas for the AirOps brand and its executives.
+
+AirOps is a content operations and precision marketing platform focused on AI search performance, Answer Engine Optimization (AEO), and Content Engineering.
+
+You know the AirOps content pillars for Q2 2026: Customers + Proof Points, Things We Shipped, Product + Use Cases, Space + Industry, Research, Inside AirOps, Event Snippets, Event Promo, Event Recap, Webinar Clips, Webinar Promo, Webinar Recap, Team Interviews, Cohort + Education.
+
+Be conversational, specific, and opinionated. Suggest concrete post ideas with hooks, not vague themes. When the user likes an idea, offer to draft it.
+
+Keep responses concise. 3-5 ideas per round unless asked for more.`;
 
 slack.message(async ({ message, client }) => {
   if (message.bot_id || message.subtype) return;
   if (message.channel_type !== 'im') return;
 
   const text = (message.text || '').trim();
-
-  // Help / intro message
+  if (!text) return;
   const lower = text.toLowerCase();
-  if (lower === 'help' || lower === 'hi' || lower === 'hello' || lower === 'hey' || lower.includes('what can you do') || lower.includes('who are you') || lower.includes('what do you do')) {
+
+  // If this is the reviewer saying "approved", handle that
+  if (message.user === REVIEWER_SLACK_ID && lower.includes('approved')) {
+    return handleApproval(message, client);
+  }
+
+  const userId = message.user;
+  let session = dmSessions.get(userId);
+
+  // Reset command
+  if (lower === 'reset' || lower === 'start over' || lower === 'menu') {
+    dmSessions.delete(userId);
+    session = null;
+  }
+
+  // Help / intro - show menu
+  if (!session && (lower === 'help' || lower === 'hi' || lower === 'hello' || lower === 'hey' || lower.includes('what can you do') || lower.includes('who are you') || lower.includes('what do you do') || !session)) {
+    // If it's a greeting or no session, show the menu
+    if (lower === 'help' || lower === 'hi' || lower === 'hello' || lower === 'hey' || lower.includes('what can you do') || lower.includes('who are you')) {
+      dmSessions.delete(userId);
+      await client.chat.postMessage({
+        channel: message.channel,
+        text: `Hey! I'm Edna, the AirOps social post agent. What would you like to do?\n\n*1️⃣ Draft a post* - I'll write a LinkedIn post + blog draft\n*2️⃣ Brainstorm ideas* - Let's ideate on content together\n\nJust reply *1* or *2* (or type "draft" or "brainstorm")`,
+      });
+      dmSessions.set(userId, { step: 'choose_mode', history: [] });
+      return;
+    }
+
+    // First message with no session - ask what they want to do
     await client.chat.postMessage({
       channel: message.channel,
-      text: `Hey! I'm Edna, the AirOps social post agent. Here's what I can do:
+      text: `Hey! I'm Edna. What would you like to do?\n\n*1️⃣ Draft a post* - I'll write a LinkedIn post + blog draft\n*2️⃣ Brainstorm ideas* - Let's ideate on content together\n\nReply *1* or *2* (or type "draft" or "brainstorm")`,
+    });
+    dmSessions.set(userId, { step: 'choose_mode', history: [] });
+    return;
+  }
 
-*Draft LinkedIn posts* - DM me a post idea and I'll generate a LinkedIn post + blog draft using the AirOps brand voice. Just type your idea and I'll get to work.
+  // ─── Step: choose mode ───────────────────────────────────────────
+  if (session.step === 'choose_mode') {
+    if (lower === '1' || lower.includes('draft')) {
+      session.step = 'choose_voice';
+      session.mode = 'draft';
+      dmSessions.set(userId, session);
+      await client.chat.postMessage({
+        channel: message.channel,
+        text: `Whose voice should I write in?\n\n*1️⃣ AirOps Brand* (@airopshq company page)\n*2️⃣ Alex Halliday* (CEO)\n*3️⃣ Christy Roach* (CMO)\n\nReply *1*, *2*, or *3*`,
+      });
+      return;
+    }
 
-*Structured requests* - Use the Social Post Request form in #social-workflow for the best results. It lets you specify the topic, post type, audience, context, Notion links, and images.
+    if (lower === '2' || lower.includes('brainstorm') || lower.includes('ideate')) {
+      session.step = 'brainstorming';
+      session.mode = 'brainstorm';
+      session.history = [];
+      dmSessions.set(userId, session);
+      await client.chat.postMessage({
+        channel: message.channel,
+        text: `Let's brainstorm! What area are you thinking about? Give me a theme, topic, upcoming event, product launch, or just tell me what's on your mind and I'll suggest some post ideas.\n\n(Type "draft" anytime to switch to drafting mode, or "reset" to start over)`,
+      });
+      return;
+    }
 
-*Notion context* - Paste a Notion page URL with your idea and I'll pull the page content as background for the draft.
-
-*Image attachments* - Upload an image with your request and it gets passed to Ordinal when the post is approved.
-
-*Approval flow* - After I generate a draft, Jess reviews it. A 👍 on my reply or an "approved" DM queues the post in Ordinal for scheduling.
-
-To get started, just send me a post idea!`,
+    // Didn't understand
+    await client.chat.postMessage({
+      channel: message.channel,
+      text: `Reply *1* for drafting or *2* for brainstorming.`,
     });
     return;
   }
 
-  // If this is the reviewer saying "approved", handle that instead
-  if (message.user === REVIEWER_SLACK_ID && text.toLowerCase().includes('approved')) {
-    return handleApproval(message, client);
-  }
+  // ─── Step: choose voice ──────────────────────────────────────────
+  if (session.step === 'choose_voice') {
+    let voiceKey = null;
+    if (lower === '1' || lower.includes('airops') || lower.includes('brand')) voiceKey = 'airops';
+    else if (lower === '2' || lower.includes('alex')) voiceKey = 'alex';
+    else if (lower === '3' || lower.includes('christy')) voiceKey = 'christy';
 
-  // Treat any other DM as a post idea
-  const postIdea = text;
-  if (!postIdea) return;
-
-  console.log(`[nuggets-agent] Post idea via DM from ${message.user}: "${postIdea.slice(0, 80)}..."`);
-
-  try {
-    await client.chat.postMessage({
-      channel: message.channel,
-      thread_ts: message.ts,
-      text: 'Got it, generating drafts...',
-    });
-
-    const notionPageIds = extractNotionPageIds(postIdea);
-    const notionContext = [];
-    for (const pid of notionPageIds) {
-      const doc = await fetchNotionPageContent(pid);
-      if (doc) notionContext.push(doc);
+    if (!voiceKey) {
+      await client.chat.postMessage({
+        channel: message.channel,
+        text: `Reply *1* (AirOps Brand), *2* (Alex), or *3* (Christy)`,
+      });
+      return;
     }
 
-    const drafts = await generateDrafts(postIdea, AIROPS_BRAND_SYSTEM_PROMPT, notionContext);
-    console.log(`[nuggets-agent] Drafts generated. Title: "${drafts.title}"`);
+    session.voice = voiceKey;
+    session.step = 'awaiting_idea';
+    dmSessions.set(userId, session);
 
-    const DM_NOTION_PAGE_ID = process.env.DM_NOTION_PAGE_ID || '33b1f419db8a8032aed0f980166410d2';
-    const notionUrl = await appendToNotionPage(drafts.title, drafts.linkedin_post, drafts.blog_draft, postIdea, DM_NOTION_PAGE_ID);
-    console.log(`[nuggets-agent] Notion page updated: ${notionUrl}`);
-
+    const voiceLabel = VOICE_OPTIONS[voiceKey].label;
     await client.chat.postMessage({
       channel: message.channel,
-      thread_ts: message.ts,
-      text: `Drafts are ready: ${notionUrl}`,
+      text: `Got it, writing as *${voiceLabel}*. What's the post idea? Give me the topic, context, data points, whatever you've got.\n\n(Paste a Notion link for extra context if you have one)`,
     });
+    return;
+  }
 
-    // Also send to reviewer for approval
-    const preview = postIdea.slice(0, 120) + (postIdea.length > 120 ? '...' : '');
-    const result = await slack.client.chat.postMessage({
-      channel: REVIEWER_SLACK_ID,
-      text: `*New post idea ready for review* 👀\n\n*Submitted via DM by <@${message.user}>*\n\n*Original nugget:*\n> ${preview}\n\n*Drafts in Notion:* ${notionUrl}\n\nReply *approved* to this message to notify them.`,
-    });
+  // ─── Step: awaiting idea → generate draft ────────────────────────
+  if (session.step === 'awaiting_idea') {
+    const postIdea = text;
+    const voiceKey = session.voice || 'airops';
+    const voiceLabel = VOICE_OPTIONS[voiceKey].label;
 
-    pendingApprovals.set(result.ts, {
-      originalChannelId: message.channel,
-      originalMessageTs: message.ts,
-      notionUrl,
-      channelName: null,
-      submitterUserId: message.user,
-      drafts,
-      dmChannelId: result.channel,
-    });
-    saveState();
+    console.log(`[nuggets-agent] DM draft request from ${userId} (voice: ${voiceLabel}): "${postIdea.slice(0, 80)}..."`);
 
-    console.log(`[nuggets-agent] DM sent to reviewer.`);
-  } catch (err) {
-    console.error('[nuggets-agent] Error processing DM post idea:', err);
-    await client.chat.postMessage({
-      channel: message.channel,
-      thread_ts: message.ts,
-      text: 'Something went wrong generating drafts. Please try again.',
-    });
+    try {
+      await client.chat.postMessage({
+        channel: message.channel,
+        text: `Got it! Drafting in *${voiceLabel}*'s voice now...`,
+      });
+
+      const notionPageIds = extractNotionPageIds(postIdea);
+      const notionContext = [];
+      for (const pid of notionPageIds) {
+        const doc = await fetchNotionPageContent(pid);
+        if (doc) notionContext.push(doc);
+      }
+
+      const systemPrompt = await fetchVoicePrompt(voiceKey);
+      const drafts = await generateDrafts(postIdea, systemPrompt || AIROPS_BRAND_SYSTEM_PROMPT, notionContext);
+      console.log(`[nuggets-agent] Drafts generated. Title: "${drafts.title}"`);
+
+      const DM_NOTION_PAGE_ID = process.env.DM_NOTION_PAGE_ID || '33b1f419db8a8032aed0f980166410d2';
+      const notionUrl = await appendToNotionPage(drafts.title, drafts.linkedin_post, drafts.blog_draft, postIdea, DM_NOTION_PAGE_ID);
+      console.log(`[nuggets-agent] Notion page updated: ${notionUrl}`);
+
+      await client.chat.postMessage({
+        channel: message.channel,
+        text: `Drafts are ready: ${notionUrl}\n\nWant to draft another? Send me another idea, or type "reset" to start over.`,
+      });
+
+      // DM reviewer
+      const preview = postIdea.slice(0, 120) + (postIdea.length > 120 ? '...' : '');
+      const result = await slack.client.chat.postMessage({
+        channel: REVIEWER_SLACK_ID,
+        text: `*New post idea ready for review* 👀\n\n*Voice:* ${voiceLabel}\n*Submitted via DM by <@${userId}>*\n\n*Original nugget:*\n> ${preview}\n\n*Drafts in Notion:* ${notionUrl}\n\nReply *approved* to this message to queue in Ordinal.`,
+      });
+
+      pendingApprovals.set(result.ts, {
+        originalChannelId: message.channel,
+        originalMessageTs: message.ts,
+        notionUrl,
+        channelName: null,
+        submitterUserId: userId,
+        drafts,
+        dmChannelId: result.channel,
+      });
+      saveState();
+
+      // Stay in awaiting_idea so they can draft another with same voice
+    } catch (err) {
+      console.error('[nuggets-agent] Error processing DM draft:', err);
+      await client.chat.postMessage({
+        channel: message.channel,
+        text: 'Something went wrong generating the draft. Please try again.',
+      });
+    }
+    return;
+  }
+
+  // ─── Brainstorm mode ─────────────────────────────────────────────
+  if (session.step === 'brainstorming') {
+    // Check if they want to switch to drafting
+    if (lower === 'draft' || lower.includes('draft that') || lower.includes('write that') || lower.includes('let\'s draft')) {
+      session.step = 'choose_voice';
+      session.mode = 'draft';
+      dmSessions.set(userId, session);
+      await client.chat.postMessage({
+        channel: message.channel,
+        text: `Let's draft it! Whose voice should I write in?\n\n*1️⃣ AirOps Brand* (@airopshq company page)\n*2️⃣ Alex Halliday* (CEO)\n*3️⃣ Christy Roach* (CMO)\n\nReply *1*, *2*, or *3*`,
+      });
+      return;
+    }
+
+    try {
+      // Add to conversation history
+      session.history.push({ role: 'user', content: text });
+
+      const response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        system: BRAINSTORM_SYSTEM_PROMPT,
+        messages: session.history,
+      });
+
+      const reply = response.content.find((b) => b.type === 'text')?.text || 'Hmm, I got stuck. Try again?';
+      session.history.push({ role: 'assistant', content: reply });
+
+      // Keep history manageable (last 20 messages)
+      if (session.history.length > 20) {
+        session.history = session.history.slice(-20);
+      }
+
+      dmSessions.set(userId, session);
+
+      await client.chat.postMessage({
+        channel: message.channel,
+        text: reply + '\n\n_(Type "draft" to write one of these up, or keep brainstorming)_',
+      });
+    } catch (err) {
+      console.error('[nuggets-agent] Brainstorm error:', err);
+      await client.chat.postMessage({
+        channel: message.channel,
+        text: 'Something went wrong. Try again?',
+      });
+    }
+    return;
   }
 });
 
