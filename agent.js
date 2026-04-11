@@ -565,13 +565,16 @@ async function sendReviewDM(notionUrl, originalMessage, originalChannelId, origi
 
 // ─── Slack event: Workflow Builder form submission ────────────────────────────
 
-slack.message(async ({ message, client }) => {
+slack.event('message', async ({ event, client }) => {
+  const message = event;
+
   // Only handle bot messages (from Workflow Builder) in watched channels
-  if (!message.bot_id) return;
+  if (!message.bot_id && !message.subtype) return;
   if (message.channel_type === 'im') return;
 
-  const text = (message.text || '').toLowerCase();
-  if (!text.includes(FORM_MARKER)) return;
+  const text = (message.text || '');
+  console.log(`[nuggets-agent] Bot message in channel: "${text.slice(0, 80)}..."`);
+  if (!text.toLowerCase().includes(FORM_MARKER)) return;
 
   // Confirm we're in a watched channel
   let channelName = 'unknown';
