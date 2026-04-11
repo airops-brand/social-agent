@@ -999,27 +999,15 @@ async function handleApproval(message, client) {
       await client.chat.postMessage({
         channel: approval.originalChannelId,
         thread_ts: approval.originalMessageTs,
-        text: `Drafts are ready in Notion: ${approval.notionUrl}`,
+        text: `Whoohoo! Getting this queued up in Ordinal.${ordinalNote}`,
       });
 
-      await client.chat.postMessage({
-        channel: REVIEWER_SLACK_ID,
-        thread_ts: threadTs || undefined,
-        text: `Done! Link posted to #${approval.channelName} 👍${ordinalNote}`,
-      });
-
-      console.log(`[nuggets-agent] Posted Notion link to #${approval.channelName} thread.`);
+      console.log(`[nuggets-agent] Approval confirmed in #${approval.channelName} thread.`);
     } else {
       await client.chat.postMessage({
         channel: approval.originalChannelId,
         thread_ts: approval.originalMessageTs,
-        text: `Your post idea has been approved! 🎉 Notion link: ${approval.notionUrl}`,
-      });
-
-      await client.chat.postMessage({
-        channel: REVIEWER_SLACK_ID,
-        thread_ts: threadTs || undefined,
-        text: `Done! <@${approval.submitterUserId}> has been notified 👍${ordinalNote}`,
+        text: `Whoohoo! Getting this queued up in Ordinal.${ordinalNote}`,
       });
 
       console.log(`[nuggets-agent] Notified DM submitter ${approval.submitterUserId}.`);
