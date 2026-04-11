@@ -123,6 +123,41 @@ async function fetchNotionPageContent(pageId) {
   }
 }
 
+// ─── AirOps docs search ───────────────────────────────────────────────────
+
+async function searchAirOpsDocs(query) {
+  try {
+    const res = await fetch('https://docs.airops.com/~gitbook/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: Date.now(),
+        method: 'tools/call',
+        params: { name: 'searchDocumentation', arguments: { query } },
+      }),
+    });
+
+    const raw = await res.text();
+    for (const line of raw.split('\n')) {
+      if (line.startsWith('data: ')) {
+        const data = JSON.parse(line.slice(6));
+        const text = data.result?.content?.[0]?.text;
+        if (text) {
+          // Cap at 3000 chars to avoid blowing up the prompt
+          return text.slice(0, 3000);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[nuggets-agent] Docs search failed:', err.message);
+  }
+  return null;
+}
+
 // ─── Form submission parsing ──────────────────────────────────────────────
 
 function parseFormSubmission(text) {
@@ -605,8 +640,21 @@ function getSystemPrompt(channelName) {
 async function generateDrafts(postIdea, systemPrompt, notionContext, customPrompt) {
   let userContent = customPrompt || `Here is the post idea from the team:\n\n"${postIdea}"`;
 
+  // Search AirOps docs for relevant product context
+  try {
+    const searchQuery = customPrompt
+      ? (customPrompt.match(/TOPIC:\s*(.+)/)?.[1] || postIdea).slice(0, 100)
+      : postIdea.slice(0, 100);
+    const docsContext = await searchAirOpsDocs(searchQuery);
+    if (docsContext) {
+      console.log(`[nuggets-agent] Found AirOps docs context (${docsContext.length} chars)`);
+      userContent += `\n\nRelevant AirOps product documentation for accuracy:\n${docsContext}\n`;
+    }
+  } catch (err) {
+    console.error('[nuggets-agent] Docs search skipped:', err.message);
+  }
+
   if (notionContext && notionContext.length > 0) {
-    // Insert Notion context before the final instruction line
     const parts = userContent.split('\nPlease write the LinkedIn post');
     userContent = parts[0];
     userContent += '\n\nThe following Notion pages were shared as additional context:\n';
