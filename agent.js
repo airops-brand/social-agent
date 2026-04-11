@@ -1514,14 +1514,17 @@ async function fetchNewsHeadlines() {
       if (!res.ok) continue;
 
       const xml = await res.text();
-      // Extract titles and links from RSS XML
+      // Extract titles and source info from RSS XML
       const titles = [];
-      const regex = /<item>[\s\S]*?<title>(.*?)<\/title>[\s\S]*?<link>(.*?)<\/link>/g;
+      const regex = /<item>[\s\S]*?<title>(.*?)<\/title>[\s\S]*?<source url="(.*?)">(.*?)<\/source>/g;
       let match;
       while ((match = regex.exec(xml)) !== null && titles.length < 3) {
-        const title = match[1].replace(/<!\[CDATA\[|\]\]>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
-        const link = match[2].replace(/<!\[CDATA\[|\]\]>/g, '').replace(/&amp;/g, '&');
-        titles.push({ title, link });
+        const fullTitle = match[1].replace(/<!\[CDATA\[|\]\]>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
+        const sourceUrl = match[2];
+        const sourceName = match[3];
+        // Strip " - Source Name" from end of title for cleaner display
+        const title = fullTitle.replace(/ - [^-]+$/, '');
+        titles.push({ title, sourceUrl, sourceName });
       }
 
       if (titles.length > 0) {
@@ -1554,7 +1557,7 @@ For each idea, provide:
 1. A one-line hook (the opening line of the post)
 2. The angle in one sentence
 3. Suggested voice: AirOps Brand, Alex, or Christy
-4. If inspired by a news story, include the article title and URL
+4. If inspired by a news story, include the article title and publication (e.g. "Source: Article Title - Publication Name (publicationurl.com)")
 
 Keep it punchy. These are starting points, not finished posts. Be opinionated and specific. No generic topics.`;
 
@@ -1576,7 +1579,7 @@ async function sendDailyIdeas() {
       for (const { topic, headlines: items } of headlines) {
         prompt += `${topic.toUpperCase()}:\n`;
         for (const item of items) {
-          prompt += `- ${item.title} (${item.link})\n`;
+          prompt += `- ${item.title} (${item.sourceName}, ${item.sourceUrl})\n`;
         }
         prompt += '\n';
       }
