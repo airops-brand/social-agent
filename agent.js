@@ -1489,9 +1489,82 @@ async function handleApproval(message, client) {
   }
 }
 
+// ─── Daily post ideas (9am CT) ────────────────────────────────────────────
+
+const DAILY_IDEAS_PROMPT = `You are Edna, the AirOps social content strategist. Generate 5 LinkedIn post ideas for the AirOps brand account and its executives.
+
+Mix across these categories:
+- AI search and AEO trends (what's changing, what brands should know)
+- Brand leadership in the age of AI (how brand teams are evolving)
+- Content Engineering as a discipline (practical insights)
+- AirOps product capabilities (tied to outcomes, not features)
+- Marketing leadership hot takes (CMO-level thinking)
+
+For each idea, provide:
+1. A one-line hook (the opening line of the post)
+2. The angle in one sentence
+3. Suggested voice: AirOps Brand, Alex, or Christy
+
+Keep it punchy. These are starting points, not finished posts. Be opinionated and specific. No generic topics.`;
+
+async function sendDailyIdeas() {
+  try {
+    console.log('[nuggets-agent] Generating daily post ideas...');
+
+    // Search docs for any recent product context
+    const docsContext = await searchAirOpsDocs('new features launches updates');
+
+    let prompt = 'Generate 5 LinkedIn post ideas for today.';
+    if (docsContext) {
+      prompt += `\n\nHere's some recent product context from AirOps docs to inspire ideas:\n${docsContext}`;
+    }
+
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1500,
+      system: DAILY_IDEAS_PROMPT,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const ideas = response.content.find((b) => b.type === 'text')?.text || 'No ideas today.';
+
+    await slack.client.chat.postMessage({
+      channel: REVIEWER_SLACK_ID,
+      text: `*Good morning! Here are today's post ideas:*\n\n${ideas}\n\n_Reply with a number to draft it, or DM me to brainstorm more._`,
+    });
+
+    console.log('[nuggets-agent] Daily ideas sent to Jess.');
+  } catch (err) {
+    console.error('[nuggets-agent] Failed to send daily ideas:', err.message);
+  }
+}
+
+function scheduleDailyIdeas() {
+  const checkInterval = 60 * 1000; // check every minute
+  let lastSentDate = null;
+
+  setInterval(() => {
+    const now = new Date();
+    // Convert to CT (UTC-5 CDT / UTC-6 CST)
+    const ct = new Date(now.toLocaleString('en-US', { timeZone: 'America/Chicago' }));
+    const hour = ct.getHours();
+    const minute = ct.getMinutes();
+    const dateKey = ct.toISOString().split('T')[0];
+
+    // 9:00 AM CT, only once per day
+    if (hour === 9 && minute === 0 && lastSentDate !== dateKey) {
+      lastSentDate = dateKey;
+      sendDailyIdeas();
+    }
+  }, checkInterval);
+
+  console.log('[startup] Daily ideas scheduler active (9:00 AM CT)');
+}
+
 // ─── Start ──────────────────────────────────────────────────────────────────
 
 (async () => {
   await slack.start();
+  scheduleDailyIdeas();
   console.log('⚡ Nuggets agent is running');
 })();
