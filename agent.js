@@ -690,6 +690,8 @@ slack.event('message', async ({ event, client }) => {
 
     // 3. Generate drafts with structured form data
     const systemPrompt = getSystemPrompt(channelName);
+    console.log(`[nuggets-agent] Form prompt:\n${formPrompt}`);
+    console.log(`[nuggets-agent] Using system prompt for: ${CHANNEL_PROMPT_MAP[channelName] || 'alex (default)'}`);
     const drafts = await generateDrafts(message.text, systemPrompt, notionContext, formPrompt);
     console.log(`[nuggets-agent] Drafts generated. Title: "${drafts.title}"`);
 
