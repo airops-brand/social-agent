@@ -419,6 +419,39 @@ STRICT WRITING RULES:
 
 // ─── Core: generate drafts via Claude ──────────────────────────────────────
 
+// ─── QA review prompt ─────────────────────────────────────────────────────
+
+const QA_SYSTEM_PROMPT = `You are a strict copy editor for the AirOps brand. Your job is to review LinkedIn posts and blog drafts for banned patterns and rewrite any violations. Do NOT change content that follows the rules. Only fix violations.
+
+BANNED PATTERNS - rewrite any line that uses these:
+1. Contrast/pivot constructions: "The [group] pulling ahead are...", "This isn't X. It's Y.", "[Noun] is table stakes. [Other noun] is the advantage.", "Most [group] are doing X. The ones winning are doing Y." State claims directly without a foil.
+2. "at scale", "bulk", "governed", "seamless", "robust", "leverage" (as verb), "groundbreaking", "revolutionary", "synergize", "game-changing", "disrupt"
+3. Em dashes (— or --). Use a period or line break instead.
+4. "X isn't just Y, it's Z" or "It's not about X, it's about Y" constructions
+5. "The truth is...", "The reality is...", "Let that sink in", "Now more than ever."
+6. "The best part?", "The secret?", "Here's the thing...", "Let's be honest..."
+7. Faux-dramatic staccato: "No fluff. No filler. Just results." / "Simple. Clear. Effective."
+8. Tricolon / rule-of-three parallel fragments that build rhythmically
+9. "In today's world," "In an era where," "Gone are the days when..."
+10. "BREAKING //", "NEW //", "JUST DROPPED", "TLDR;" as openers
+11. Affirmations: "Love this", "Great point", "So important", "100%", "Absolutely"
+12. "delve into", "it's worth noting that", "leveraging", "Furthermore", "Moreover", "Additionally"
+13. Hollow exclamation points on product announcements, research, or event promos
+14. "Click here to learn more", "Check it out", "Don't miss this" as CTAs
+15. The word "layer" in any context
+16. "AI SEO" or "LLM SEO" instead of "AEO"
+17. Boldface for emphasis in body text (bold is for structural elements only)
+
+Return your response as valid JSON with this exact shape:
+{
+  "linkedin_post": "the cleaned linkedin post",
+  "blog_draft": "the cleaned blog draft",
+  "fixes": ["list of what you changed, or empty array if nothing needed fixing"]
+}
+
+If nothing needs fixing, return the original text unchanged with an empty fixes array.
+Return only valid JSON, no markdown fences, no preamble.`;
+
 const SYSTEM_PROMPTS = {
   alex: ALEX_SYSTEM_PROMPT,
   airops: AIROPS_BRAND_SYSTEM_PROMPT,
@@ -462,7 +495,38 @@ async function generateDrafts(postIdea, systemPrompt, notionContext, customPromp
   const raw = message.content.find((b) => b.type === 'text')?.text || '{}';
   // Strip any accidental markdown fences
   const clean = raw.replace(/```json|```/g, '').trim();
-  return JSON.parse(clean);
+  const drafts = JSON.parse(clean);
+
+  // QA review pass - check for banned patterns and rewrite
+  try {
+    const qaMessage = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2000,
+      system: QA_SYSTEM_PROMPT,
+      messages: [
+        {
+          role: 'user',
+          content: `Review this LinkedIn post and blog draft for banned patterns. Fix any violations.\n\nLinkedIn post:\n${drafts.linkedin_post}\n\nBlog draft:\n${drafts.blog_draft}\n\nReturn only valid JSON, no markdown fences, no preamble.`,
+        },
+      ],
+    });
+
+    const qaRaw = qaMessage.content.find((b) => b.type === 'text')?.text || '{}';
+    const qaClean = qaRaw.replace(/```json|```/g, '').trim();
+    const qa = JSON.parse(qaClean);
+
+    if (qa.fixes && qa.fixes.length > 0) {
+      console.log(`[nuggets-agent] QA fixes applied: ${qa.fixes.join('; ')}`);
+      drafts.linkedin_post = qa.linkedin_post;
+      drafts.blog_draft = qa.blog_draft;
+    } else {
+      console.log('[nuggets-agent] QA passed, no fixes needed');
+    }
+  } catch (err) {
+    console.error('[nuggets-agent] QA review failed (using original draft):', err.message);
+  }
+
+  return drafts;
 }
 
 // ─── Helper: split text into Notion paragraph blocks (max 2000 chars each) ──
