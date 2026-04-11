@@ -54,6 +54,12 @@ const POST_IDEA_REGEX = /post[\s\-_#]*idea/i;
 // Matches Notion URLs in message text
 const NOTION_URL_REGEX = /https?:\/\/(?:www\.)?notion\.(?:so|site)\/(?:[^\/]+\/)?([a-f0-9]{32}|[a-f0-9-]{36})/gi;
 
+// Marker that identifies a Workflow Builder form submission
+const FORM_MARKER = '📋 social post request';
+
+// Valid post types for the form dropdown
+const POST_TYPES = ['product launch', 'research / data', 'event / activation', 'thought leadership', 'customer story', 'cultural / team'];
+
 // ─── Clients ───────────────────────────────────────────────────────────────
 
 const slack = new App({
@@ -112,6 +118,57 @@ async function fetchNotionPageContent(pageId) {
     console.error(`[nuggets-agent] Failed to fetch Notion page ${pageId}:`, err.message);
     return null;
   }
+}
+
+// ─── Form submission parsing ──────────────────────────────────────────────
+
+function parseFormSubmission(text) {
+  const fields = {};
+  const lines = text.split('\n');
+
+  let currentField = null;
+  let currentValue = [];
+
+  for (const line of lines) {
+    // Match bold field labels like "*Topic:*" or "*Topic*"
+    const fieldMatch = line.match(/^\*([^*]+?):?\*\s*(.*)/);
+    if (fieldMatch) {
+      if (currentField) {
+        fields[currentField] = currentValue.join('\n').trim();
+      }
+      currentField = fieldMatch[1].trim().toLowerCase();
+      currentValue = fieldMatch[2] ? [fieldMatch[2]] : [];
+    } else if (currentField && line.trim()) {
+      currentValue.push(line);
+    }
+  }
+
+  if (currentField) {
+    fields[currentField] = currentValue.join('\n').trim();
+  }
+
+  return fields;
+}
+
+function buildFormPrompt(fields) {
+  let prompt = `Here is a social post request from the team:\n\n`;
+  prompt += `Topic: ${fields.topic || fields['post topic'] || 'Not specified'}\n`;
+
+  const postType = fields['post type'] || fields.type || '';
+  if (postType) prompt += `Post type: ${postType}\n`;
+
+  const context = fields.context || fields.brief || fields['context / brief'] || '';
+  if (context) prompt += `\nAdditional context:\n${context}\n`;
+
+  const audience = fields.audience || fields['target audience'] || '';
+  if (audience) prompt += `Target audience: ${audience}\n`;
+
+  // Extract any Notion URLs from all field values
+  const allText = Object.values(fields).join(' ');
+  const notionLink = fields['notion link'] || fields['notion url'] || '';
+
+  prompt += '\nPlease write the LinkedIn post and blog draft. Return only valid JSON, no markdown fences, no preamble.';
+  return { prompt, notionLink, allText };
 }
 
 // ─── In-memory state ────────────────────────────────────────────────────────
@@ -336,17 +393,23 @@ function getSystemPrompt(channelName) {
   return SYSTEM_PROMPTS[key] || ALEX_SYSTEM_PROMPT;
 }
 
-async function generateDrafts(postIdea, systemPrompt, notionContext) {
-  let userContent = `Here is the post idea from the team:\n\n"${postIdea}"`;
+async function generateDrafts(postIdea, systemPrompt, notionContext, customPrompt) {
+  let userContent = customPrompt || `Here is the post idea from the team:\n\n"${postIdea}"`;
 
   if (notionContext && notionContext.length > 0) {
+    // Insert Notion context before the final instruction line
+    const parts = userContent.split('\nPlease write the LinkedIn post');
+    userContent = parts[0];
     userContent += '\n\nThe following Notion pages were shared as additional context:\n';
     for (const doc of notionContext) {
       userContent += `\n--- "${doc.title}" ---\n${doc.content}\n`;
     }
+    if (parts[1]) {
+      userContent += '\nPlease write the LinkedIn post' + parts[1];
+    } else {
+      userContent += '\n\nPlease write the LinkedIn post and blog draft. Return only valid JSON, no markdown fences, no preamble.';
+    }
   }
-
-  userContent += '\n\nPlease write the LinkedIn post and blog draft. Return only valid JSON, no markdown fences, no preamble.';
 
   const message = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
@@ -499,6 +562,81 @@ async function sendReviewDM(notionUrl, originalMessage, originalChannelId, origi
 
   return result.ts;
 }
+
+// ─── Slack event: Workflow Builder form submission ────────────────────────────
+
+slack.message(async ({ message, client }) => {
+  // Only handle bot messages (from Workflow Builder) in watched channels
+  if (!message.bot_id) return;
+  if (message.channel_type === 'im') return;
+
+  const text = (message.text || '').toLowerCase();
+  if (!text.includes(FORM_MARKER)) return;
+
+  // Confirm we're in a watched channel
+  let channelName = 'unknown';
+  try {
+    const info = await client.conversations.info({ channel: message.channel });
+    channelName = info.channel?.name || 'unknown';
+    if (!WATCH_CHANNELS.includes(channelName)) return;
+  } catch {
+    return;
+  }
+
+  console.log(`[nuggets-agent] Form submission detected in #${channelName}`);
+
+  const fields = parseFormSubmission(message.text);
+  const { prompt: formPrompt, allText } = buildFormPrompt(fields);
+
+  try {
+    // 1. Acknowledge
+    await client.chat.postMessage({
+      channel: message.channel,
+      thread_ts: message.ts,
+      text: 'Got your request! Generating a post draft now, hold tight.',
+    });
+
+    // 2. Fetch any linked Notion pages
+    const notionPageIds = extractNotionPageIds(allText);
+    const notionContext = [];
+    for (const pid of notionPageIds) {
+      const doc = await fetchNotionPageContent(pid);
+      if (doc) notionContext.push(doc);
+    }
+
+    // 3. Generate drafts with structured form data
+    const systemPrompt = getSystemPrompt(channelName);
+    const drafts = await generateDrafts(message.text, systemPrompt, notionContext, formPrompt);
+    console.log(`[nuggets-agent] Drafts generated. Title: "${drafts.title}"`);
+
+    // 4. Append to Notion page
+    const pageId = getNotionPageId(channelName);
+    const notionUrl = await appendToNotionPage(drafts.title, drafts.linkedin_post, drafts.blog_draft, message.text, pageId);
+    console.log(`[nuggets-agent] Notion page updated: ${notionUrl}`);
+
+    // 5. Follow up in thread
+    const followUp = await client.chat.postMessage({
+      channel: message.channel,
+      thread_ts: message.ts,
+      text: `Post draft is ready! Take a look and give me a 👍 when approved: ${notionUrl}`,
+    });
+
+    // 6. DM reviewer
+    const dmTs = await sendReviewDM(notionUrl, fields.topic || message.text, message.channel, message.ts, channelName, drafts);
+    console.log(`[nuggets-agent] DM sent to reviewer.`);
+
+    // 7. Map for thumbs-up approval
+    reactionApprovalMap.set(`${message.channel}:${followUp.ts}`, dmTs);
+    reactionApprovalMap.set(`${message.channel}:${message.ts}`, dmTs);
+  } catch (err) {
+    console.error('[nuggets-agent] Error processing form submission:', err);
+    await client.chat.postMessage({
+      channel: message.channel,
+      thread_ts: message.ts,
+      text: 'Something went wrong generating the draft. Please try again.',
+    });
+  }
+});
 
 // ─── Slack event: message in watched channels ────────────────────────────────
 
