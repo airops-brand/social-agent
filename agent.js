@@ -169,10 +169,13 @@ function buildFormPrompt(fields) {
   if (audience) prompt += `TARGET AUDIENCE: ${audience}\n`;
   if (imageDesc) prompt += `IMAGE NOTES: ${imageDesc}\n`;
 
+  const publishDate = fields['preferred post date'] || fields['post date'] || fields['date'] || '';
+  if (publishDate) prompt += `PREFERRED POST DATE: ${publishDate}\n`;
+
   const allText = Object.values(fields).join(' ') + ' ' + notionLink;
 
   prompt += '\nPlease write the LinkedIn post and blog draft based on the above. Return only valid JSON, no markdown fences, no preamble.';
-  return { prompt, notionLink, allText };
+  return { prompt, notionLink, allText, publishDate };
 }
 
 // ─── Persistent state ──────────────────────────────────────────────────────
@@ -618,10 +621,25 @@ function getSlackFileUrls(message) {
 
 // ─── Core: queue LinkedIn post in Ordinal ─────────────────────────────────
 
-async function queueOrdinalPost(title, linkedinPost, assetIds) {
+async function queueOrdinalPost(title, linkedinPost, assetIds, publishDate) {
+  // Parse the preferred date if provided, default to now
+  let publishAt = new Date().toISOString();
+  if (publishDate) {
+    try {
+      const parsed = new Date(publishDate);
+      if (!isNaN(parsed.getTime())) {
+        // Default to 10am CT if no time specified
+        if (!publishDate.includes(':')) {
+          parsed.setHours(15, 0, 0, 0); // 10am CT = 15:00 UTC
+        }
+        publishAt = parsed.toISOString();
+      }
+    } catch { /* fall back to now */ }
+  }
+
   const args = {
     title,
-    publishAt: new Date().toISOString(),
+    publishAt,
     status: 'Finalized',
     linkedIn: {
       profileId: ORDINAL_LINKEDIN_PROFILE_ID,
@@ -704,7 +722,7 @@ slack.event('message', async ({ event, client }) => {
   console.log(`[nuggets-agent] Form submission detected in #${channelName}`);
 
   const fields = parseFormSubmission(message.text);
-  const { prompt: formPrompt, allText } = buildFormPrompt(fields);
+  const { prompt: formPrompt, allText, publishDate } = buildFormPrompt(fields);
   const imageFiles = getSlackFileUrls(message);
 
   try {
@@ -752,10 +770,11 @@ slack.event('message', async ({ event, client }) => {
     const dmTs = await sendReviewDM(notionUrl, originalSummary, message.channel, message.ts, channelName, drafts);
     console.log(`[nuggets-agent] DM sent to reviewer.`);
 
-    // Store image URLs on the pending approval for Ordinal upload on approve
-    if (imageFiles.length > 0) {
-      const pending = pendingApprovals.get(dmTs);
-      if (pending) pending.imageFiles = imageFiles;
+    // Store image URLs and publish date on the pending approval
+    const pending = pendingApprovals.get(dmTs);
+    if (pending) {
+      if (imageFiles.length > 0) pending.imageFiles = imageFiles;
+      if (publishDate) pending.publishDate = publishDate;
     }
 
     // 7. Map for thumbs-up approval
@@ -984,7 +1003,7 @@ async function handleApproval(message, client) {
           }
         }
 
-        const ordinalId = await queueOrdinalPost(approval.drafts.title, approval.drafts.linkedin_post, assetIds);
+        const ordinalId = await queueOrdinalPost(approval.drafts.title, approval.drafts.linkedin_post, assetIds, approval.publishDate);
         console.log(`[nuggets-agent] Queued in Ordinal: ${ordinalId}`);
         ordinalNote = assetIds.length > 0
           ? `\nLinkedIn post queued in Ordinal with ${assetIds.length} image(s).`
