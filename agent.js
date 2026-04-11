@@ -257,7 +257,7 @@ const VOICE_OPTIONS = {
   airops: { label: 'AirOps Brand', contentTypeId: 23019 },
   alex: { label: 'Alex Halliday', contentTypeId: 23020 },
   christy: { label: 'Christy Roach', contentTypeId: 26745 },
-  matt: { label: 'Matt Hammel', contentTypeId: null }, // coming soon
+  matt: { label: 'Matt Hammel', contentTypeId: 23015 },
 };
 
 // Cache for fetched voice prompts
@@ -304,6 +304,12 @@ async function fetchVoicePrompt(voiceKey) {
 
   if (voiceKey === 'christy') {
     const prompt = buildChristyPrompt();
+    voicePromptCache[voiceKey] = prompt;
+    return prompt;
+  }
+
+  if (voiceKey === 'matt') {
+    const prompt = buildMattPrompt();
     voicePromptCache[voiceKey] = prompt;
     return prompt;
   }
@@ -367,6 +373,68 @@ BLOG DRAFT RULES:
 - Use H2/H3 headings framed as questions. Short paragraphs.
 - Lead with business outcomes, not features.
 - No em dashes. Active voice throughout.
+- Length: 600-1000 words for a full draft, or a detailed outline if the nugget needs more research`;
+}
+
+function buildMattPrompt() {
+  return `You are a ghostwriting assistant for Matt Hammel, Co-founder and COO of AirOps.
+
+AirOps is an AI platform for organic growth. Onsite SEO, offsite SEO, and AEO / agent-driven discovery are all parts of the same system and must be operated together.
+
+Your job is to write two things given a post idea or nugget of information:
+1. A LinkedIn post in Matt's authentic voice
+2. A blog post outline or draft expanding on the same idea
+
+Return your response as valid JSON with this exact shape:
+{
+  "title": "short title summarising the topic (used as Notion page name)",
+  "linkedin_post": "the full linkedin post text",
+  "blog_draft": "the full blog post content in markdown"
+}
+
+MATT'S LINKEDIN VOICE:
+
+IDENTITY: Matt is a founder who builds in public. He shares what he's learning from customers, data, and his team. He speaks to peers as equals. He is not performing authority. He is a builder sharing signal.
+
+TONE: Confident and direct. Collegial. Casual-professional. He mixes plain language ("the fix," "the game has inverted," "that's days of work") with real industry substance. Occasionally uses enthusiasm markers: "coooooooked," "insane stat," "BIG NEWS!" Self-aware. He admits mistakes at AirOps before presenting solutions.
+
+OPENING HOOKS (must use one of these patterns):
+- Surprising stat: "We just discovered an insane stat: almost 50% of traffic to our product docs was from AI agents."
+- Tension/provocation: "It's absolutely shocking to me how many candidates we talk to who don't even attempt to try the product."
+- Story entry: "A new engineer asked me in a 1:1 yesterday what his 'Claude Code budget' was."
+- Bold claim: "The content on your website accounts for roughly 15% of why you get mentioned in AI responses."
+- Scene: "I sat 10 feet from the Head of App Platform at OpenAI last month."
+Never open with context-setting, definitions, or soft preambles.
+
+SENTENCE STRUCTURE: Default short. Key points under 15 words. Single-sentence paragraphs for emphasis. Pattern: punch, punch, explain, punch. Examples: "That stung." / "The difference was night and day." / "I don't buy it."
+
+PARAGRAPH STRUCTURE: One idea per paragraph. Max 1-3 sentences. Aggressive white space. If a paragraph exceeds 4 sentences, break it up.
+
+CREDIBILITY PATTERNS:
+- Ground claims in specifics: data points, named team members, named customers, named companies
+- Show vulnerability before the win: acknowledge what was hard or broken first, then show the fix
+- Credit the team by name in nearly every post
+
+CLOSING: End with exactly one element: a single CTA, a team shoutout, a brief forward-looking statement, or a punchy final line. Never stack CTAs. Never end with inspirational statements.
+
+WRITING RULES:
+1. No hedging. No "I think," "perhaps," "it seems," "arguably," "it's worth noting." State it directly.
+2. No corporate jargon. No "leverage," "synergy," "best-in-class," "paradigm shift."
+3. No vague quantifiers. Always specific numbers and named examples.
+4. No contrastive reframing ("It's not X, it's Y").
+5. No inspirational sign-offs.
+6. No emojis except sparingly (trophy, pointing down, muscle). No emoji strings.
+7. No exclamation points unless genuinely earned (rare).
+8. Shorter is almost always better. Cut sentences that don't add information or momentum.
+9. Voice check: must sound like a founder texting a peer about something he just learned.
+10. Uses contractions naturally. "We're shipping Thursday" not "We are shipping on Thursday."
+
+BLOG DRAFT RULES:
+- Open with a bolded "TL;DR" section, 4-6 bullet points
+- Use H2/H3 headings framed as questions. Short paragraphs.
+- Lead with business outcomes, not features.
+- Show vulnerability before the win.
+- Ground every claim in specifics.
 - Length: 600-1000 words for a full draft, or a detailed outline if the nugget needs more research`;
 }
 
@@ -1152,15 +1220,34 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
 
 // ─── Slack event: DM conversations ────────────────────────────────────────
 
-const BRAINSTORM_SYSTEM_PROMPT = `You are Edna, the AirOps social content brainstorming partner. You help marketing teams come up with LinkedIn post ideas for the AirOps brand and its executives.
+const EDNA_PERSONA = `You are Edna, the AirOps social agent. Your personality: authoritative, crisp, zero patience for fluff, dry wit, deeply competent. You speak in declarations, not suggestions. Short sentences. No emojis. No exclamation points unless genuinely earned (rare). You care about the team and the work. Your bluntness is respect, not dismissal.
+
+You never say: "Hey team!", "Super excited to share", "Friendly reminder", "No worries", "Just circling back", "Hope everyone's having a great week!"
+
+You sound like: "Three ideas. All specific. Pick one and I'll draft it." / "That topic has legs. Here's the angle that would actually land." / "Vague brief. Give me the data point and I'll give you a post."`;
+
+const BRAINSTORM_SYSTEM_PROMPT = `${EDNA_PERSONA}
+
+You help the AirOps team come up with LinkedIn post ideas for the brand and its executives.
 
 AirOps is a content operations and precision marketing platform focused on AI search performance, Answer Engine Optimization (AEO), and Content Engineering.
 
-You know the AirOps content pillars for Q2 2026: Customers + Proof Points, Things We Shipped, Product + Use Cases, Space + Industry, Research, Inside AirOps, Event Snippets, Event Promo, Event Recap, Webinar Clips, Webinar Promo, Webinar Recap, Team Interviews, Cohort + Education.
+Content pillars for Q2 2026: Customers + Proof Points, Things We Shipped, Product + Use Cases, Space + Industry, Research, Inside AirOps, Event Snippets, Event Promo, Event Recap, Webinar Clips, Webinar Promo, Webinar Recap, Team Interviews, Cohort + Education.
 
-Be conversational, specific, and opinionated. Suggest concrete post ideas with hooks, not vague themes. When the user likes an idea, offer to draft it.
+Suggest concrete post ideas with hooks, not vague themes. When someone likes an idea, offer to draft it. 3-5 ideas per round unless asked for more.`;
 
-Keep responses concise. 3-5 ideas per round unless asked for more.`;
+const EDNA_CHAT_SYSTEM_PROMPT = `${EDNA_PERSONA}
+
+You are the AirOps social agent built by Jess Rosenberg in April 2026 using Claude Code. You run on Railway, connected to Slack, Notion, Ordinal, Claude API, AirOps docs, and Google News RSS.
+
+You can answer questions about:
+- How you were built (Node.js, Claude Code session, one day build)
+- Social media trends, AI search, AEO, content marketing, brand strategy
+- AirOps product and capabilities (you search the docs)
+- Content strategy and LinkedIn best practices
+- The AirOps brand kit and voice guidelines
+
+Stay in character. Be helpful but keep the Edna voice: direct, sharp, no fluff. If someone asks something you genuinely don't know, say so plainly.`;
 
 slack.message(async ({ message, client }) => {
   if (message.bot_id || message.subtype) return;
@@ -1184,25 +1271,85 @@ slack.message(async ({ message, client }) => {
     session = null;
   }
 
-  // Help / intro - show menu
-  if (!session && (lower === 'help' || lower === 'hi' || lower === 'hello' || lower === 'hey' || lower.includes('what can you do') || lower.includes('who are you') || lower.includes('what do you do') || !session)) {
-    // If it's a greeting or no session, show the menu
-    if (lower === 'help' || lower === 'hi' || lower === 'hello' || lower === 'hey' || lower.includes('what can you do') || lower.includes('who are you')) {
-      dmSessions.delete(userId);
-      await client.chat.postMessage({
-        channel: message.channel,
-        text: `Hey! I'm Edna, the AirOps social post agent. What would you like to do?\n\n*1️⃣ Draft a post* - I'll write a LinkedIn post + blog draft\n*2️⃣ Brainstorm ideas* - Let's ideate on content together\n\nJust reply *1* or *2* (or type "draft" or "brainstorm")`,
-      });
-      dmSessions.set(userId, { step: 'choose_mode', history: [] });
-      return;
-    }
-
-    // First message with no session - ask what they want to do
+  // Draft/brainstorm shortcuts without going through menu
+  if (!session && (lower === 'draft' || lower.includes('draft a post') || lower.includes('write a post'))) {
+    dmSessions.set(userId, { step: 'choose_voice', mode: 'draft', history: [] });
     await client.chat.postMessage({
       channel: message.channel,
-      text: `Hey! I'm Edna. What would you like to do?\n\n*1️⃣ Draft a post* - I'll write a LinkedIn post + blog draft\n*2️⃣ Brainstorm ideas* - Let's ideate on content together\n\nReply *1* or *2* (or type "draft" or "brainstorm")`,
+      text: `Whose voice?\n\n*1️⃣ AirOps Brand* (@airopshq company page)\n*2️⃣ Alex Halliday* (CEO)\n*3️⃣ Christy Roach* (CMO)\n*4️⃣ Matt Hammel* (COO)\n\nReply *1*, *2*, *3*, or *4*`,
+    });
+    return;
+  }
+
+  if (!session && (lower === 'brainstorm' || lower.includes('brainstorm') || lower.includes('ideate'))) {
+    dmSessions.set(userId, { step: 'brainstorming', mode: 'brainstorm', history: [] });
+    await client.chat.postMessage({
+      channel: message.channel,
+      text: `Good. Give me a theme, topic, event, or launch and I will give you angles worth posting.\n\n(Type "draft" to switch to drafting, "reset" to start over)`,
+    });
+    return;
+  }
+
+  // Help / menu
+  if (!session && (lower === 'help' || lower === 'menu')) {
+    await client.chat.postMessage({
+      channel: message.channel,
+      text: `Edna. AirOps social agent. Here is what I do.\n\n*"draft"* - I write a LinkedIn post + blog draft in the voice you choose\n*"brainstorm"* - We ideate on content together\n*"reset"* - Start over\n\nOr just talk to me. I have opinions on most things.`,
     });
     dmSessions.set(userId, { step: 'choose_mode', history: [] });
+    return;
+  }
+
+  // No session and not a command - chat freely as Edna
+  if (!session) {
+    session = { step: 'chatting', history: [] };
+    dmSessions.set(userId, session);
+  }
+
+  // If in choose_mode and they say something that isn't 1/2/draft/brainstorm, treat as chat
+  if (session.step === 'choose_mode' && lower !== '1' && lower !== '2' && !lower.includes('draft') && !lower.includes('brainstorm')) {
+    session.step = 'chatting';
+    dmSessions.set(userId, session);
+  }
+
+  // ─── Free chat mode ──────────────────────────────────────────────
+  if (session.step === 'chatting') {
+    try {
+      session.history.push({ role: 'user', content: text });
+
+      // Search docs if they're asking about AirOps product stuff
+      let docsContext = '';
+      if (lower.includes('airops') || lower.includes('page360') || lower.includes('brand kit') || lower.includes('aeo') || lower.includes('workflow') || lower.includes('grid')) {
+        const docs = await searchAirOpsDocs(text.slice(0, 100));
+        if (docs) docsContext = `\n\nRelevant AirOps docs for reference:\n${docs}`;
+      }
+
+      const sysPrompt = docsContext ? EDNA_CHAT_SYSTEM_PROMPT + docsContext : EDNA_CHAT_SYSTEM_PROMPT;
+
+      const response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        system: sysPrompt,
+        messages: session.history,
+      });
+
+      const reply = response.content.find((b) => b.type === 'text')?.text || 'Something broke. Try again.';
+      session.history.push({ role: 'assistant', content: reply });
+
+      if (session.history.length > 20) session.history = session.history.slice(-20);
+      dmSessions.set(userId, session);
+
+      await client.chat.postMessage({
+        channel: message.channel,
+        text: reply + '\n\n_(Type "draft" to write a post, "brainstorm" to ideate, or keep talking)_',
+      });
+    } catch (err) {
+      console.error('[nuggets-agent] Chat error:', err);
+      await client.chat.postMessage({
+        channel: message.channel,
+        text: 'Something broke. Try again.',
+      });
+    }
     return;
   }
 
@@ -1214,7 +1361,7 @@ slack.message(async ({ message, client }) => {
       dmSessions.set(userId, session);
       await client.chat.postMessage({
         channel: message.channel,
-        text: `Whose voice should I write in?\n\n*1️⃣ AirOps Brand* (@airopshq company page)\n*2️⃣ Alex Halliday* (CEO)\n*3️⃣ Christy Roach* (CMO)\n\nReply *1*, *2*, or *3*`,
+        text: `Whose voice should I write in?\n\n*1️⃣ AirOps Brand* (@airopshq company page)\n*2️⃣ Alex Halliday* (CEO)\n*3️⃣ Christy Roach* (CMO)\n*4️⃣ Matt Hammel* (COO)\n\nReply *1*, *2*, *3*, or *4*`,
       });
       return;
     }
@@ -1245,11 +1392,12 @@ slack.message(async ({ message, client }) => {
     if (lower === '1' || lower.includes('airops') || lower.includes('brand')) voiceKey = 'airops';
     else if (lower === '2' || lower.includes('alex')) voiceKey = 'alex';
     else if (lower === '3' || lower.includes('christy')) voiceKey = 'christy';
+    else if (lower === '4' || lower.includes('matt')) voiceKey = 'matt';
 
     if (!voiceKey) {
       await client.chat.postMessage({
         channel: message.channel,
-        text: `Reply *1* (AirOps Brand), *2* (Alex), or *3* (Christy)`,
+        text: `Reply *1* (AirOps Brand), *2* (Alex), *3* (Christy), or *4* (Matt)`,
       });
       return;
     }
@@ -1338,7 +1486,7 @@ slack.message(async ({ message, client }) => {
       dmSessions.set(userId, session);
       await client.chat.postMessage({
         channel: message.channel,
-        text: `Let's draft it! Whose voice should I write in?\n\n*1️⃣ AirOps Brand* (@airopshq company page)\n*2️⃣ Alex Halliday* (CEO)\n*3️⃣ Christy Roach* (CMO)\n\nReply *1*, *2*, or *3*`,
+        text: `Let's draft it! Whose voice should I write in?\n\n*1️⃣ AirOps Brand* (@airopshq company page)\n*2️⃣ Alex Halliday* (CEO)\n*3️⃣ Christy Roach* (CMO)\n*4️⃣ Matt Hammel* (COO)\n\nReply *1*, *2*, *3*, or *4*`,
       });
       return;
     }
