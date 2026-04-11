@@ -649,8 +649,9 @@ slack.event('message', async ({ event, client }) => {
   if (message.channel_type === 'im') return;
 
   const text = (message.text || '');
-  console.log(`[nuggets-agent] Bot message in channel: "${text.slice(0, 80)}..."`);
-  if (!text.toLowerCase().includes(FORM_MARKER)) return;
+  const botName = (message.username || message.bot_profile?.name || '').toLowerCase();
+  console.log(`[nuggets-agent] Bot message in channel (bot: "${botName}"): "${text.slice(0, 80)}..."`);
+  if (!text.toLowerCase().includes(FORM_MARKER) && !botName.includes(FORM_MARKER)) return;
 
   // Confirm we're in a watched channel
   let channelName = 'unknown';
