@@ -38,6 +38,7 @@ const WATCH_CHANNELS = (process.env.WATCH_CHANNELS || '0-nuggets')
   .map((c) => c.trim().replace(/^#/, ''));
 const ORDINAL_API_KEY = process.env.ORDINAL_API_KEY;
 const ORDINAL_LINKEDIN_PROFILE_ID = process.env.ORDINAL_LINKEDIN_PROFILE_ID || 'a68df3c6-0870-45d0-adfc-a9b3d9917557'; // AirOps
+const ORDINAL_APPROVER_USER_ID = process.env.ORDINAL_APPROVER_USER_ID || 'a32a8b1b-7218-4ca6-bd50-f4649694e1bb'; // Jessica Rosenberg
 
 // Channel → Notion page overrides (format: "channel:pageId,channel:pageId")
 const CHANNEL_NOTION_MAP = {};
@@ -633,6 +634,22 @@ async function queueOrdinalPost(title, linkedinPost, assetIds) {
   }
 
   const post = await ordinalMcpCall('posts-create', args);
+
+  // Assign approval to Jessica
+  try {
+    await ordinalMcpCall('approvals-create', {
+      postId: post.id,
+      approvals: [{
+        userId: ORDINAL_APPROVER_USER_ID,
+        message: 'Auto-assigned from Slack social agent',
+        isBlocking: true,
+      }],
+    });
+    console.log(`[nuggets-agent] Ordinal approval assigned to Jessica for post ${post.id}`);
+  } catch (err) {
+    console.error('[nuggets-agent] Failed to create Ordinal approval (non-blocking):', err.message);
+  }
+
   return post.id;
 }
 
