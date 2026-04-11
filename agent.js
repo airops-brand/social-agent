@@ -67,6 +67,8 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 // Maps DM thread_ts → { originalChannelId, originalMessageTs, notionUrl }
 // In production, swap this for a lightweight DB (e.g. SQLite, Redis)
 const pendingApprovals = new Map();
+// Maps channel message ts → DM approval key (for thumbs-up reaction matching)
+const reactionApprovalMap = new Map();
 
 // Channel → system prompt overrides
 const CHANNEL_PROMPT_MAP = {};
@@ -474,15 +476,20 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
     console.log(`[nuggets-agent] Notion page updated: ${notionUrl}`);
 
     // 4. Follow up in thread with the link
-    await client.chat.postMessage({
+    const followUp = await client.chat.postMessage({
       channel: message.channel,
       thread_ts: message.ts,
-      text: `<@${message.user}> Your post draft is ready! Take a look and give me a thumbs up when approved: ${notionUrl}`,
+      text: `<@${message.user}> Your post draft is ready! Take a look and give me a 👍 when approved: ${notionUrl}`,
     });
 
     // 5. DM reviewer
-    await sendReviewDM(notionUrl, postIdea, message.channel, message.ts, channelName, drafts);
+    const dmTs = await sendReviewDM(notionUrl, postIdea, message.channel, message.ts, channelName, drafts);
     console.log(`[nuggets-agent] DM sent to reviewer.`);
+
+    // 6. Map the follow-up message for thumbs-up reaction matching
+    reactionApprovalMap.set(`${message.channel}:${followUp.ts}`, dmTs);
+    // Also map the original message in case they react to that
+    reactionApprovalMap.set(`${message.channel}:${message.ts}`, dmTs);
   } catch (err) {
     console.error('[nuggets-agent] Error processing post idea:', err);
   }
@@ -552,6 +559,29 @@ slack.message(async ({ message, client }) => {
       text: 'Something went wrong generating drafts. Please try again.',
     });
   }
+});
+
+// ─── Slack event: thumbs-up reaction from reviewer ────────────────────────
+
+slack.event('reaction_added', async ({ event, client }) => {
+  if (event.user !== REVIEWER_SLACK_ID) return;
+  if (event.reaction !== '+1' && event.reaction !== 'thumbsup') return;
+
+  const key = `${event.item.channel}:${event.item.ts}`;
+  const dmTs = reactionApprovalMap.get(key);
+  if (!dmTs || !pendingApprovals.has(dmTs)) return;
+
+  console.log(`[nuggets-agent] Thumbs-up approval from reviewer on ${key}`);
+
+  const approval = pendingApprovals.get(dmTs);
+  const fakeMessage = {
+    channel: approval.dmChannelId,
+    thread_ts: dmTs,
+    user: REVIEWER_SLACK_ID,
+  };
+
+  await handleApproval(fakeMessage, client);
+  reactionApprovalMap.delete(key);
 });
 
 // ─── Approval handler ─────────────────────────────────────────────────────
@@ -625,6 +655,11 @@ async function handleApproval(message, client) {
     }
 
     pendingApprovals.delete(approvalKey);
+
+    // Clean up reaction map entries pointing to this approval
+    for (const [rKey, rVal] of reactionApprovalMap.entries()) {
+      if (rVal === approvalKey) reactionApprovalMap.delete(rKey);
+    }
   } catch (err) {
     console.error('[nuggets-agent] Error posting approved link:', err);
   }
