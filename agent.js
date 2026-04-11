@@ -580,22 +580,22 @@ async function ordinalMcpCall(toolName, args) {
 
 // ─── Core: upload image to Ordinal ────────────────────────────────────────
 
-async function uploadToOrdinal(slackFileUrl) {
-  // Make Slack file public so Ordinal can download it
-  // Extract file ID from the URL and make it public
-  const slackRes = await fetch(slackFileUrl, {
-    headers: { 'Authorization': `Bearer ${process.env.SLACK_BOT_TOKEN}` },
-    redirect: 'follow',
-  });
-
-  if (!slackRes.ok) {
-    throw new Error(`Failed to access Slack file: ${slackRes.status}`);
+async function uploadToOrdinal(fileId) {
+  // Make the Slack file publicly accessible
+  const shareRes = await slack.client.files.sharedPublicURL({ file: fileId });
+  if (!shareRes.ok) {
+    throw new Error(`Failed to make Slack file public: ${shareRes.error}`);
   }
 
-  // Ordinal needs a public URL - use Slack's public sharing
-  // For now, try passing the private URL with redirect (Ordinal may follow it)
-  // If that fails, we'd need to re-host the file
-  const upload = await ordinalMcpCall('uploads-create', { url: slackFileUrl });
+  // Build the public URL from permalink_public
+  // Slack public URLs follow the pattern: https://files.slack.com/{team_id}-{pub_secret}/{file_id}/{filename}
+  const file = shareRes.file;
+  const pubSecret = file.permalink_public.split('-').pop();
+  const publicUrl = `${file.url_private}?pub_secret=${pubSecret}`;
+
+  console.log(`[nuggets-agent] Slack file made public: ${publicUrl}`);
+
+  const upload = await ordinalMcpCall('uploads-create', { url: publicUrl });
   const uploadId = upload.id;
 
   // Poll for completion
@@ -610,13 +610,13 @@ async function uploadToOrdinal(slackFileUrl) {
   throw new Error('Ordinal upload timed out');
 }
 
-// ─── Core: extract Slack file URLs from message ──────────────────────────
+// ─── Core: extract Slack file info from message ──────────────────────────
 
-function getSlackFileUrls(message) {
+function getSlackFileIds(message) {
   if (!message.files || message.files.length === 0) return [];
   return message.files
     .filter((f) => f.mimetype && f.mimetype.startsWith('image/'))
-    .map((f) => f.url_private);
+    .map((f) => f.id);
 }
 
 // ─── Core: queue LinkedIn post in Ordinal ─────────────────────────────────
@@ -723,7 +723,7 @@ slack.event('message', async ({ event, client }) => {
 
   const fields = parseFormSubmission(message.text);
   const { prompt: formPrompt, allText, publishDate } = buildFormPrompt(fields);
-  const imageFiles = getSlackFileUrls(message);
+  const imageFiles = getSlackFileIds(message);
 
   try {
     // 1. Acknowledge
@@ -992,9 +992,9 @@ async function handleApproval(message, client) {
         // Upload any attached images first
         const assetIds = [];
         if (approval.imageFiles && approval.imageFiles.length > 0) {
-          for (const fileUrl of approval.imageFiles) {
+          for (const fileId of approval.imageFiles) {
             try {
-              const assetId = await uploadToOrdinal(fileUrl);
+              const assetId = await uploadToOrdinal(fileId);
               if (assetId) assetIds.push(assetId);
               console.log(`[nuggets-agent] Uploaded image to Ordinal: ${assetId}`);
             } catch (err) {
