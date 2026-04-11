@@ -51,6 +51,9 @@ function getNotionPageId(channelName) {
 // Regex that catches: "post idea", "post-idea", "#post-idea", "post_idea" — case insensitive
 const POST_IDEA_REGEX = /post[\s\-_#]*idea/i;
 
+// Matches Notion URLs in message text
+const NOTION_URL_REGEX = /https?:\/\/(?:www\.)?notion\.(?:so|site)\/(?:[^\/]+\/)?([a-f0-9]{32}|[a-f0-9-]{36})/gi;
+
 // ─── Clients ───────────────────────────────────────────────────────────────
 
 const slack = new App({
@@ -62,6 +65,54 @@ const slack = new App({
 
 const notion = new NotionClient({ auth: process.env.NOTION_TOKEN });
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// ─── Notion content fetching ───────────────────────────────────────────────
+
+function extractNotionPageIds(text) {
+  const ids = [];
+  let match;
+  const regex = new RegExp(NOTION_URL_REGEX.source, 'gi');
+  while ((match = regex.exec(text)) !== null) {
+    let id = match[1].replace(/-/g, '');
+    // Format as UUID
+    if (id.length === 32) {
+      id = `${id.slice(0,8)}-${id.slice(8,12)}-${id.slice(12,16)}-${id.slice(16,20)}-${id.slice(20)}`;
+    }
+    ids.push(id);
+  }
+  return ids;
+}
+
+function blockToText(block) {
+  const richTextFields = ['paragraph', 'heading_1', 'heading_2', 'heading_3', 'bulleted_list_item', 'numbered_list_item', 'quote', 'callout', 'toggle'];
+  for (const field of richTextFields) {
+    if (block.type === field && block[field]?.rich_text) {
+      const text = block[field].rich_text.map((t) => t.plain_text).join('');
+      if (field.startsWith('heading')) return `\n## ${text}\n`;
+      if (field === 'bulleted_list_item') return `- ${text}`;
+      if (field === 'numbered_list_item') return `1. ${text}`;
+      if (field === 'quote') return `> ${text}`;
+      return text;
+    }
+  }
+  return '';
+}
+
+async function fetchNotionPageContent(pageId) {
+  try {
+    const page = await notion.pages.retrieve({ page_id: pageId });
+    const titleProp = Object.values(page.properties).find((p) => p.type === 'title');
+    const title = titleProp?.title?.map((t) => t.plain_text).join('') || 'Untitled';
+
+    const blocks = await notion.blocks.children.list({ block_id: pageId, page_size: 100 });
+    const content = blocks.results.map(blockToText).filter(Boolean).join('\n');
+
+    return { title, content: content.slice(0, 8000) }; // cap to avoid token overflow
+  } catch (err) {
+    console.error(`[nuggets-agent] Failed to fetch Notion page ${pageId}:`, err.message);
+    return null;
+  }
+}
 
 // ─── In-memory state ────────────────────────────────────────────────────────
 // Maps DM thread_ts → { originalChannelId, originalMessageTs, notionUrl }
@@ -285,7 +336,18 @@ function getSystemPrompt(channelName) {
   return SYSTEM_PROMPTS[key] || ALEX_SYSTEM_PROMPT;
 }
 
-async function generateDrafts(postIdea, systemPrompt) {
+async function generateDrafts(postIdea, systemPrompt, notionContext) {
+  let userContent = `Here is the post idea from the team:\n\n"${postIdea}"`;
+
+  if (notionContext && notionContext.length > 0) {
+    userContent += '\n\nThe following Notion pages were shared as additional context:\n';
+    for (const doc of notionContext) {
+      userContent += `\n--- "${doc.title}" ---\n${doc.content}\n`;
+    }
+  }
+
+  userContent += '\n\nPlease write the LinkedIn post and blog draft. Return only valid JSON, no markdown fences, no preamble.';
+
   const message = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 2000,
@@ -293,7 +355,7 @@ async function generateDrafts(postIdea, systemPrompt) {
     messages: [
       {
         role: 'user',
-        content: `Here is the post idea from the team:\n\n"${postIdea}"\n\nPlease write the LinkedIn post and blog draft. Return only valid JSON, no markdown fences, no preamble.`,
+        content: userContent,
       },
     ],
   });
@@ -465,28 +527,39 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
       text: `Hey <@${message.user}>! Thanks for your nugget. Drafting up a post now, hold tight.`,
     });
 
-    // 2. Generate drafts
+    // 2. Fetch any linked Notion pages for context
+    const notionPageIds = extractNotionPageIds(postIdea);
+    const notionContext = [];
+    for (const pid of notionPageIds) {
+      const doc = await fetchNotionPageContent(pid);
+      if (doc) notionContext.push(doc);
+    }
+    if (notionContext.length > 0) {
+      console.log(`[nuggets-agent] Fetched ${notionContext.length} Notion page(s) for context`);
+    }
+
+    // 3. Generate drafts
     const systemPrompt = getSystemPrompt(channelName);
-    const drafts = await generateDrafts(postIdea, systemPrompt);
+    const drafts = await generateDrafts(postIdea, systemPrompt, notionContext);
     console.log(`[nuggets-agent] Drafts generated. Title: "${drafts.title}"`);
 
-    // 3. Append to Notion page
+    // 4. Append to Notion page
     const pageId = getNotionPageId(channelName);
     const notionUrl = await appendToNotionPage(drafts.title, drafts.linkedin_post, drafts.blog_draft, postIdea, pageId);
     console.log(`[nuggets-agent] Notion page updated: ${notionUrl}`);
 
-    // 4. Follow up in thread with the link
+    // 5. Follow up in thread with the link
     const followUp = await client.chat.postMessage({
       channel: message.channel,
       thread_ts: message.ts,
       text: `<@${message.user}> Your post draft is ready! Take a look and give me a 👍 when approved: ${notionUrl}`,
     });
 
-    // 5. DM reviewer
+    // 6. DM reviewer
     const dmTs = await sendReviewDM(notionUrl, postIdea, message.channel, message.ts, channelName, drafts);
     console.log(`[nuggets-agent] DM sent to reviewer.`);
 
-    // 6. Map the follow-up message for thumbs-up reaction matching
+    // 7. Map the follow-up message for thumbs-up reaction matching
     reactionApprovalMap.set(`${message.channel}:${followUp.ts}`, dmTs);
     // Also map the original message in case they react to that
     reactionApprovalMap.set(`${message.channel}:${message.ts}`, dmTs);
@@ -521,7 +594,14 @@ slack.message(async ({ message, client }) => {
       text: 'Got it, generating drafts...',
     });
 
-    const drafts = await generateDrafts(postIdea, ALEX_SYSTEM_PROMPT);
+    const notionPageIds = extractNotionPageIds(postIdea);
+    const notionContext = [];
+    for (const pid of notionPageIds) {
+      const doc = await fetchNotionPageContent(pid);
+      if (doc) notionContext.push(doc);
+    }
+
+    const drafts = await generateDrafts(postIdea, ALEX_SYSTEM_PROMPT, notionContext);
     console.log(`[nuggets-agent] Drafts generated. Title: "${drafts.title}"`);
 
     const notionUrl = await appendToNotionPage(drafts.title, drafts.linkedin_post, drafts.blog_draft, postIdea, DEFAULT_NOTION_PAGE_ID);
