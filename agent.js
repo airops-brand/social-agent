@@ -16,6 +16,8 @@
  */
 
 require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
 
 console.log('[startup] SLACK_BOT_TOKEN set:', !!process.env.SLACK_BOT_TOKEN);
 console.log('[startup] SLACK_SIGNING_SECRET set:', !!process.env.SLACK_SIGNING_SECRET);
@@ -172,12 +174,41 @@ function buildFormPrompt(fields) {
   return { prompt, notionLink, allText };
 }
 
-// ─── In-memory state ────────────────────────────────────────────────────────
-// Maps DM thread_ts → { originalChannelId, originalMessageTs, notionUrl }
-// In production, swap this for a lightweight DB (e.g. SQLite, Redis)
-const pendingApprovals = new Map();
-// Maps channel message ts → DM approval key (for thumbs-up reaction matching)
-const reactionApprovalMap = new Map();
+// ─── Persistent state ──────────────────────────────────────────────────────
+
+const STATE_DIR = process.env.STATE_DIR || '/data';
+const STATE_FILE = path.join(STATE_DIR, 'approvals.json');
+
+function loadState() {
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      console.log(`[startup] Loaded ${Object.keys(data.approvals || {}).length} pending approval(s) from disk`);
+      return data;
+    }
+  } catch (err) {
+    console.error('[startup] Failed to load state, starting fresh:', err.message);
+  }
+  return { approvals: {}, reactions: {} };
+}
+
+function saveState() {
+  try {
+    // Ensure directory exists
+    if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true });
+    const data = {
+      approvals: Object.fromEntries(pendingApprovals),
+      reactions: Object.fromEntries(reactionApprovalMap),
+    };
+    fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error('[state] Failed to save state:', err.message);
+  }
+}
+
+const savedState = loadState();
+const pendingApprovals = new Map(Object.entries(savedState.approvals || {}));
+const reactionApprovalMap = new Map(Object.entries(savedState.reactions || {}));
 
 // Channel → system prompt overrides
 const CHANNEL_PROMPT_MAP = {};
@@ -636,6 +667,7 @@ async function sendReviewDM(notionUrl, originalMessage, originalChannelId, origi
     drafts,
     dmChannelId: result.channel,
   });
+  saveState();
 
   return result.ts;
 }
@@ -724,6 +756,7 @@ slack.event('message', async ({ event, client }) => {
     // 7. Map for thumbs-up approval
     reactionApprovalMap.set(`${message.channel}:${followUp.ts}`, dmTs);
     reactionApprovalMap.set(`${message.channel}:${message.ts}`, dmTs);
+    saveState();
   } catch (err) {
     console.error('[nuggets-agent] Error processing form submission:', err);
     await client.chat.postMessage({
@@ -797,6 +830,7 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
     reactionApprovalMap.set(`${message.channel}:${followUp.ts}`, dmTs);
     // Also map the original message in case they react to that
     reactionApprovalMap.set(`${message.channel}:${message.ts}`, dmTs);
+    saveState();
   } catch (err) {
     console.error('[nuggets-agent] Error processing post idea:', err);
   }
@@ -863,6 +897,7 @@ slack.message(async ({ message, client }) => {
       drafts,
       dmChannelId: result.channel,
     });
+    saveState();
 
     console.log(`[nuggets-agent] DM sent to reviewer.`);
   } catch (err) {
@@ -896,6 +931,7 @@ slack.event('reaction_added', async ({ event, client }) => {
 
   await handleApproval(fakeMessage, client);
   reactionApprovalMap.delete(key);
+  saveState();
 });
 
 // ─── Approval handler ─────────────────────────────────────────────────────
@@ -990,6 +1026,7 @@ async function handleApproval(message, client) {
     for (const [rKey, rVal] of reactionApprovalMap.entries()) {
       if (rVal === approvalKey) reactionApprovalMap.delete(rKey);
     }
+    saveState();
   } catch (err) {
     console.error('[nuggets-agent] Error posting approved link:', err);
   }
