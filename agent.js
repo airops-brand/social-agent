@@ -970,6 +970,28 @@ slack.message(async ({ message, client }) => {
 
   const text = (message.text || '').trim();
 
+  // Help / intro message
+  const lower = text.toLowerCase();
+  if (lower === 'help' || lower === 'hi' || lower === 'hello' || lower === 'hey' || lower.includes('what can you do') || lower.includes('who are you') || lower.includes('what do you do')) {
+    await client.chat.postMessage({
+      channel: message.channel,
+      text: `Hey! I'm Edna, the AirOps social post agent. Here's what I can do:
+
+*Draft LinkedIn posts* - DM me a post idea and I'll generate a LinkedIn post + blog draft using the AirOps brand voice. Just type your idea and I'll get to work.
+
+*Structured requests* - Use the Social Post Request form in #social-workflow for the best results. It lets you specify the topic, post type, audience, context, Notion links, and images.
+
+*Notion context* - Paste a Notion page URL with your idea and I'll pull the page content as background for the draft.
+
+*Image attachments* - Upload an image with your request and it gets passed to Ordinal when the post is approved.
+
+*Approval flow* - After I generate a draft, Jess reviews it. A 👍 on my reply or an "approved" DM queues the post in Ordinal for scheduling.
+
+To get started, just send me a post idea!`,
+    });
+    return;
+  }
+
   // If this is the reviewer saying "approved", handle that instead
   if (message.user === REVIEWER_SLACK_ID && text.toLowerCase().includes('approved')) {
     return handleApproval(message, client);
