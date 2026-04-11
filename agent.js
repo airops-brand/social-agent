@@ -645,30 +645,55 @@ async function ordinalMcpCall(toolName, args) {
 // ─── Core: upload image to Ordinal ────────────────────────────────────────
 
 async function uploadToOrdinal(fileId) {
-  // Make the Slack file publicly accessible
-  const shareRes = await slack.client.files.sharedPublicURL({ file: fileId });
-  if (!shareRes.ok) {
-    throw new Error(`Failed to make Slack file public: ${shareRes.error}`);
+  // Step 1: Get file info
+  const fileInfo = await slack.client.files.info({ file: fileId });
+  if (!fileInfo.ok) {
+    throw new Error(`Failed to get Slack file info: ${fileInfo.error}`);
+  }
+  const file = fileInfo.file;
+  console.log(`[nuggets-agent] Processing file: ${file.name} (${file.mimetype})`);
+
+  // Step 2: Make the file publicly accessible
+  try {
+    await slack.client.files.sharedPublicURL({ file: fileId });
+  } catch (err) {
+    // May already be public, that's fine
+    if (!err.data?.error?.includes('already_public')) {
+      console.log(`[nuggets-agent] sharedPublicURL note: ${err.message}`);
+    }
   }
 
-  // Build the public URL from permalink_public
-  // Slack public URLs follow the pattern: https://files.slack.com/{team_id}-{pub_secret}/{file_id}/{filename}
-  const file = shareRes.file;
-  const pubSecret = file.permalink_public.split('-').pop();
-  const publicUrl = `${file.url_private}?pub_secret=${pubSecret}`;
+  // Step 3: Re-fetch file info to get the permalink_public
+  const updatedInfo = await slack.client.files.info({ file: fileId });
+  const updatedFile = updatedInfo.file;
 
-  console.log(`[nuggets-agent] Slack file made public: ${publicUrl}`);
+  if (!updatedFile.permalink_public) {
+    throw new Error('Could not get public permalink for Slack file');
+  }
 
+  // Extract pub_secret from permalink_public
+  // Format: https://slack-files.com/TXXXXX-FXXXXX-abc123def456
+  const permalinkParts = updatedFile.permalink_public.split('/');
+  const lastPart = permalinkParts[permalinkParts.length - 1]; // e.g. "TXXXXX-FXXXXX-abc123def456"
+  const segments = lastPart.split('-');
+  const pubSecret = segments.slice(2).join('-'); // everything after team and file ID
+
+  const publicUrl = `${updatedFile.url_private}?pub_secret=${pubSecret}`;
+  console.log(`[nuggets-agent] Public URL: ${publicUrl}`);
+
+  // Step 4: Upload to Ordinal
   const upload = await ordinalMcpCall('uploads-create', { url: publicUrl });
+  console.log(`[nuggets-agent] Ordinal upload created: ${JSON.stringify(upload)}`);
   const uploadId = upload.id;
 
-  // Poll for completion
+  // Step 5: Poll for completion
   for (let i = 0; i < 15; i++) {
     await new Promise((r) => setTimeout(r, 2000));
     const status = await ordinalMcpCall('uploads-get', { id: uploadId });
+    console.log(`[nuggets-agent] Upload status: ${JSON.stringify(status)}`);
     if (status.assetId) return status.assetId;
     if (status.status === 'ready' && status.assetId) return status.assetId;
-    if (status.status === 'failed') throw new Error('Ordinal upload failed');
+    if (status.status === 'failed') throw new Error(`Ordinal upload failed: ${JSON.stringify(status)}`);
   }
 
   throw new Error('Ordinal upload timed out');
