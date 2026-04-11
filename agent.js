@@ -543,65 +543,67 @@ async function appendToNotionPage(title, linkedinPost, blogDraft, originalMessag
   return notionUrl;
 }
 
-// ─── Core: upload image to Ordinal ────────────────────────────────────────
+// ─── Core: Ordinal MCP helper ─────────────────────────────────────────────
 
-async function uploadToOrdinal(slackFileUrl) {
-  // Ordinal's uploads-create accepts a URL and downloads from it
-  // Slack file URLs need the bot token for auth, so we download first and re-host
-  // Actually, Ordinal accepts public URLs. Slack private URLs need a proxy.
-  // We'll download from Slack and upload the bytes to a temp location,
-  // or use Slack's public URL if available.
-
-  // First, get a public URL by downloading from Slack
-  const slackRes = await fetch(slackFileUrl, {
-    headers: { 'Authorization': `Bearer ${process.env.SLACK_BOT_TOKEN}` },
-  });
-
-  if (!slackRes.ok) {
-    throw new Error(`Failed to download from Slack: ${slackRes.status}`);
-  }
-
-  const buffer = await slackRes.arrayBuffer();
-  const contentType = slackRes.headers.get('content-type') || 'image/png';
-  const ext = contentType.includes('jpeg') || contentType.includes('jpg') ? 'jpg' : 'png';
-
-  // Upload to Ordinal using their upload endpoint
-  const formData = new FormData();
-  formData.append('file', new Blob([buffer], { type: contentType }), `image.${ext}`);
-
-  const uploadRes = await fetch('https://app.tryordinal.com/api/uploads', {
+async function ordinalMcpCall(toolName, args) {
+  const res = await fetch('https://app.tryordinal.com/api/mcp', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${ORDINAL_API_KEY}`,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/event-stream',
     },
-    body: formData,
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: Date.now(),
+      method: 'tools/call',
+      params: { name: toolName, arguments: args },
+    }),
   });
 
-  if (!uploadRes.ok) {
-    const body = await uploadRes.text();
-    throw new Error(`Ordinal upload error ${uploadRes.status}: ${body}`);
-  }
-
-  const upload = await uploadRes.json();
-
-  // Poll for upload completion
-  let assetId = upload.assetId || upload.id;
-  if (!assetId && upload.uploadId) {
-    // Need to poll uploads-get for the assetId
-    for (let i = 0; i < 10; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      const statusRes = await fetch(`https://app.tryordinal.com/api/uploads/${upload.uploadId}`, {
-        headers: { 'Authorization': `Bearer ${ORDINAL_API_KEY}` },
-      });
-      if (statusRes.ok) {
-        const status = await statusRes.json();
-        if (status.assetId) { assetId = status.assetId; break; }
-        if (status.status === 'failed') throw new Error('Ordinal upload failed');
-      }
+  const raw = await res.text();
+  // Parse SSE response
+  for (const line of raw.split('\n')) {
+    if (line.startsWith('data: ')) {
+      const data = JSON.parse(line.slice(6));
+      if (data.error) throw new Error(`Ordinal MCP error: ${JSON.stringify(data.error)}`);
+      const text = data.result?.content?.[0]?.text;
+      return text ? JSON.parse(text) : data.result;
     }
   }
+  throw new Error('No response from Ordinal MCP');
+}
 
-  return assetId;
+// ─── Core: upload image to Ordinal ────────────────────────────────────────
+
+async function uploadToOrdinal(slackFileUrl) {
+  // Make Slack file public so Ordinal can download it
+  // Extract file ID from the URL and make it public
+  const slackRes = await fetch(slackFileUrl, {
+    headers: { 'Authorization': `Bearer ${process.env.SLACK_BOT_TOKEN}` },
+    redirect: 'follow',
+  });
+
+  if (!slackRes.ok) {
+    throw new Error(`Failed to access Slack file: ${slackRes.status}`);
+  }
+
+  // Ordinal needs a public URL - use Slack's public sharing
+  // For now, try passing the private URL with redirect (Ordinal may follow it)
+  // If that fails, we'd need to re-host the file
+  const upload = await ordinalMcpCall('uploads-create', { url: slackFileUrl });
+  const uploadId = upload.id;
+
+  // Poll for completion
+  for (let i = 0; i < 15; i++) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const status = await ordinalMcpCall('uploads-get', { id: uploadId });
+    if (status.assetId) return status.assetId;
+    if (status.status === 'ready' && status.assetId) return status.assetId;
+    if (status.status === 'failed') throw new Error('Ordinal upload failed');
+  }
+
+  throw new Error('Ordinal upload timed out');
 }
 
 // ─── Core: extract Slack file URLs from message ──────────────────────────
@@ -616,35 +618,21 @@ function getSlackFileUrls(message) {
 // ─── Core: queue LinkedIn post in Ordinal ─────────────────────────────────
 
 async function queueOrdinalPost(title, linkedinPost, assetIds) {
-  const linkedInConfig = {
-    profileId: ORDINAL_LINKEDIN_PROFILE_ID,
-    copy: linkedinPost,
+  const args = {
+    title,
+    publishAt: new Date().toISOString(),
+    status: 'Finalized',
+    linkedIn: {
+      profileId: ORDINAL_LINKEDIN_PROFILE_ID,
+      copy: linkedinPost,
+    },
   };
 
   if (assetIds && assetIds.length > 0) {
-    linkedInConfig.assetIds = assetIds;
+    args.linkedIn.assetIds = assetIds;
   }
 
-  const res = await fetch('https://app.tryordinal.com/api/posts', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${ORDINAL_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      title,
-      publishAt: new Date().toISOString(),
-      status: 'Finalized',
-      linkedIn: linkedInConfig,
-    }),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Ordinal API error ${res.status}: ${body}`);
-  }
-
-  const post = await res.json();
+  const post = await ordinalMcpCall('posts-create', args);
   return post.id;
 }
 
