@@ -511,9 +511,88 @@ async function appendToNotionPage(title, linkedinPost, blogDraft, originalMessag
   return notionUrl;
 }
 
+// ─── Core: upload image to Ordinal ────────────────────────────────────────
+
+async function uploadToOrdinal(slackFileUrl) {
+  // Ordinal's uploads-create accepts a URL and downloads from it
+  // Slack file URLs need the bot token for auth, so we download first and re-host
+  // Actually, Ordinal accepts public URLs. Slack private URLs need a proxy.
+  // We'll download from Slack and upload the bytes to a temp location,
+  // or use Slack's public URL if available.
+
+  // First, get a public URL by downloading from Slack
+  const slackRes = await fetch(slackFileUrl, {
+    headers: { 'Authorization': `Bearer ${process.env.SLACK_BOT_TOKEN}` },
+  });
+
+  if (!slackRes.ok) {
+    throw new Error(`Failed to download from Slack: ${slackRes.status}`);
+  }
+
+  const buffer = await slackRes.arrayBuffer();
+  const contentType = slackRes.headers.get('content-type') || 'image/png';
+  const ext = contentType.includes('jpeg') || contentType.includes('jpg') ? 'jpg' : 'png';
+
+  // Upload to Ordinal using their upload endpoint
+  const formData = new FormData();
+  formData.append('file', new Blob([buffer], { type: contentType }), `image.${ext}`);
+
+  const uploadRes = await fetch('https://app.tryordinal.com/api/uploads', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${ORDINAL_API_KEY}`,
+    },
+    body: formData,
+  });
+
+  if (!uploadRes.ok) {
+    const body = await uploadRes.text();
+    throw new Error(`Ordinal upload error ${uploadRes.status}: ${body}`);
+  }
+
+  const upload = await uploadRes.json();
+
+  // Poll for upload completion
+  let assetId = upload.assetId || upload.id;
+  if (!assetId && upload.uploadId) {
+    // Need to poll uploads-get for the assetId
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const statusRes = await fetch(`https://app.tryordinal.com/api/uploads/${upload.uploadId}`, {
+        headers: { 'Authorization': `Bearer ${ORDINAL_API_KEY}` },
+      });
+      if (statusRes.ok) {
+        const status = await statusRes.json();
+        if (status.assetId) { assetId = status.assetId; break; }
+        if (status.status === 'failed') throw new Error('Ordinal upload failed');
+      }
+    }
+  }
+
+  return assetId;
+}
+
+// ─── Core: extract Slack file URLs from message ──────────────────────────
+
+function getSlackFileUrls(message) {
+  if (!message.files || message.files.length === 0) return [];
+  return message.files
+    .filter((f) => f.mimetype && f.mimetype.startsWith('image/'))
+    .map((f) => f.url_private);
+}
+
 // ─── Core: queue LinkedIn post in Ordinal ─────────────────────────────────
 
-async function queueOrdinalPost(title, linkedinPost) {
+async function queueOrdinalPost(title, linkedinPost, assetIds) {
+  const linkedInConfig = {
+    profileId: ORDINAL_LINKEDIN_PROFILE_ID,
+    copy: linkedinPost,
+  };
+
+  if (assetIds && assetIds.length > 0) {
+    linkedInConfig.assetIds = assetIds;
+  }
+
   const res = await fetch('https://app.tryordinal.com/api/posts', {
     method: 'POST',
     headers: {
@@ -524,10 +603,7 @@ async function queueOrdinalPost(title, linkedinPost) {
       title,
       publishAt: new Date().toISOString(),
       status: 'Finalized',
-      linkedIn: {
-        profileId: ORDINAL_LINKEDIN_PROFILE_ID,
-        copy: linkedinPost,
-      },
+      linkedIn: linkedInConfig,
     }),
   });
 
@@ -590,13 +666,16 @@ slack.event('message', async ({ event, client }) => {
 
   const fields = parseFormSubmission(message.text);
   const { prompt: formPrompt, allText } = buildFormPrompt(fields);
+  const imageFiles = getSlackFileUrls(message);
 
   try {
     // 1. Acknowledge
     await client.chat.postMessage({
       channel: message.channel,
       thread_ts: message.ts,
-      text: 'Got your request! Generating a post draft now, hold tight.',
+      text: imageFiles.length > 0
+        ? `Got your request and ${imageFiles.length} image(s)! Generating a post draft now, hold tight.`
+        : 'Got your request! Generating a post draft now, hold tight.',
     });
 
     // 2. Fetch any linked Notion pages
@@ -625,8 +704,14 @@ slack.event('message', async ({ event, client }) => {
     });
 
     // 6. DM reviewer
-    const dmTs = await sendReviewDM(notionUrl, fields.topic || message.text, message.channel, message.ts, channelName, drafts);
+    const dmTs = await sendReviewDM(notionUrl, fields.topic || fields["what is the post's topic"] || message.text, message.channel, message.ts, channelName, drafts);
     console.log(`[nuggets-agent] DM sent to reviewer.`);
+
+    // Store image URLs on the pending approval for Ordinal upload on approve
+    if (imageFiles.length > 0) {
+      const pending = pendingApprovals.get(dmTs);
+      if (pending) pending.imageFiles = imageFiles;
+    }
 
     // 7. Map for thumbs-up approval
     reactionApprovalMap.set(`${message.channel}:${followUp.ts}`, dmTs);
@@ -832,13 +917,29 @@ async function handleApproval(message, client) {
   }
 
   try {
-    // Queue the LinkedIn post in Ordinal
+    // Upload images to Ordinal (if any), then queue the post
     let ordinalNote = '';
     if (ORDINAL_API_KEY && approval.drafts) {
       try {
-        const ordinalId = await queueOrdinalPost(approval.drafts.title, approval.drafts.linkedin_post);
+        // Upload any attached images first
+        const assetIds = [];
+        if (approval.imageFiles && approval.imageFiles.length > 0) {
+          for (const fileUrl of approval.imageFiles) {
+            try {
+              const assetId = await uploadToOrdinal(fileUrl);
+              if (assetId) assetIds.push(assetId);
+              console.log(`[nuggets-agent] Uploaded image to Ordinal: ${assetId}`);
+            } catch (err) {
+              console.error('[nuggets-agent] Image upload error (non-blocking):', err.message);
+            }
+          }
+        }
+
+        const ordinalId = await queueOrdinalPost(approval.drafts.title, approval.drafts.linkedin_post, assetIds);
         console.log(`[nuggets-agent] Queued in Ordinal: ${ordinalId}`);
-        ordinalNote = '\nLinkedIn post queued in Ordinal.';
+        ordinalNote = assetIds.length > 0
+          ? `\nLinkedIn post queued in Ordinal with ${assetIds.length} image(s).`
+          : '\nLinkedIn post queued in Ordinal.';
       } catch (err) {
         console.error('[nuggets-agent] Ordinal error (non-blocking):', err.message);
         ordinalNote = '\n⚠️ Failed to queue in Ordinal.';
