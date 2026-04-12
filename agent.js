@@ -317,6 +317,9 @@ const reactionApprovalMap = new Map(Object.entries(savedState.reactions || {}));
 // DM conversation state: userId → { mode, voice, history[] }
 const dmSessions = new Map();
 
+// Thread draft context: "channel:thread_ts" → { originalIdea, drafts, systemPrompt, channelName, notionContext }
+const threadDrafts = new Map();
+
 // Voice options with brand kit content type IDs
 const VOICE_OPTIONS = {
   airops: { label: 'AirOps Brand', contentTypeId: 23019 },
@@ -1232,7 +1235,16 @@ slack.event('message', async ({ event, client }) => {
     const followUp = await client.chat.postMessage({
       channel: message.channel,
       thread_ts: message.ts,
-      text: `Post draft is ready! Take a look and give me a 👍 when approved: ${notionUrl}`,
+      text: `Post draft is ready! Take a look and give me a 👍 when approved: ${notionUrl}\n\n_Reply in this thread with feedback to revise._`,
+    });
+
+    // Store draft context for thread revisions
+    threadDrafts.set(`${message.channel}:${message.ts}`, {
+      originalIdea: formPrompt,
+      drafts,
+      systemPrompt,
+      channelName,
+      notionPageId: pageId,
     });
 
     // 6. DM reviewer
@@ -1312,7 +1324,16 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
     const followUp = await client.chat.postMessage({
       channel: message.channel,
       thread_ts: message.ts,
-      text: `<@${message.user}> Your post draft is ready! Take a look and give me a 👍 when approved: ${notionUrl}`,
+      text: `<@${message.user}> Your post draft is ready! Take a look and give me a 👍 when approved: ${notionUrl}\n\n_Reply in this thread with feedback to revise._`,
+    });
+
+    // Store draft context for thread revisions
+    threadDrafts.set(`${message.channel}:${message.ts}`, {
+      originalIdea: postIdea,
+      drafts,
+      systemPrompt,
+      channelName,
+      notionPageId: pageId,
     });
 
     // 6. DM reviewer
@@ -1326,6 +1347,109 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
     saveState();
   } catch (err) {
     console.error('[nuggets-agent] Error processing post idea:', err);
+  }
+});
+
+// ─── Slack event: thread replies for draft revisions ──────────────────────
+
+slack.message(async ({ message, client }) => {
+  // Only handle thread replies in channels (not DMs, not top-level)
+  if (message.bot_id || message.subtype) return;
+  if (message.channel_type === 'im') return;
+  if (!message.thread_ts) return; // must be a thread reply
+
+  const threadKey = `${message.channel}:${message.thread_ts}`;
+  const draftCtx = threadDrafts.get(threadKey);
+  if (!draftCtx) return; // not a thread we're tracking
+
+  const feedback = message.text;
+  console.log(`[nuggets-agent] Thread revision request: "${feedback.slice(0, 80)}..."`);
+
+  try {
+    await client.chat.postMessage({
+      channel: message.channel,
+      thread_ts: message.thread_ts,
+      text: 'On it. Revising the draft now.',
+    });
+
+    // Fetch any URLs in the feedback for context
+    const notionPageIds = extractNotionPageIds(feedback);
+    const notionContext = [];
+    for (const pid of notionPageIds) {
+      const doc = await fetchNotionPageContent(pid);
+      if (doc) notionContext.push(doc);
+    }
+
+    // Fetch web URLs for context
+    let webContext = '';
+    const urlMatch = feedback.match(/https?:\/\/[^\s>]+/g);
+    if (urlMatch) {
+      for (const url of urlMatch) {
+        if (url.includes('notion.so')) continue; // already handled
+        try {
+          const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+          if (res.ok) {
+            const html = await res.text();
+            // Extract text content roughly
+            const textContent = html.replace(/<script[\s\S]*?<\/script>/gi, '')
+              .replace(/<style[\s\S]*?<\/style>/gi, '')
+              .replace(/<[^>]+>/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 3000);
+            webContext += `\n\nContent from ${url}:\n${textContent}`;
+          }
+        } catch {}
+      }
+    }
+
+    // Build revision prompt with previous draft + feedback
+    const revisionPrompt = `Here is the original post idea:\n"${draftCtx.originalIdea}"\n\nHere is the current LinkedIn draft:\n"${draftCtx.drafts.linkedin_post}"\n\nHere is the current blog draft:\n"${draftCtx.drafts.blog_draft}"\n\nThe user wants this revision:\n"${feedback}"\n${webContext}\n\nPlease rewrite the LinkedIn post and blog draft incorporating this feedback. Return only valid JSON, no markdown fences, no preamble.`;
+
+    const revisedDrafts = await generateDrafts(
+      draftCtx.originalIdea,
+      draftCtx.systemPrompt,
+      notionContext,
+      revisionPrompt
+    );
+    console.log(`[nuggets-agent] Revised draft generated. Title: "${revisedDrafts.title}"`);
+
+    // Update Notion
+    const notionUrl = await appendToNotionPage(
+      revisedDrafts.title + ' (revised)',
+      revisedDrafts.linkedin_post,
+      revisedDrafts.blog_draft,
+      `Revision of: ${draftCtx.originalIdea}\nFeedback: ${feedback}`,
+      draftCtx.notionPageId
+    );
+
+    // Update stored draft context
+    draftCtx.drafts = revisedDrafts;
+    threadDrafts.set(threadKey, draftCtx);
+
+    await client.chat.postMessage({
+      channel: message.channel,
+      thread_ts: message.thread_ts,
+      text: `Revised draft is ready: ${notionUrl}\n\nGive me a 👍 when approved, or reply again to revise further.`,
+    });
+
+    // Update the pending approval with new drafts
+    for (const [key, approval] of pendingApprovals.entries()) {
+      if (approval.originalChannelId === message.channel && approval.originalMessageTs === message.thread_ts) {
+        approval.drafts = revisedDrafts;
+        approval.notionUrl = notionUrl;
+        saveState();
+        break;
+      }
+    }
+
+  } catch (err) {
+    console.error('[nuggets-agent] Thread revision error:', err);
+    await client.chat.postMessage({
+      channel: message.channel,
+      thread_ts: message.thread_ts,
+      text: 'Something went wrong with the revision. Try again.',
+    });
   }
 });
 
