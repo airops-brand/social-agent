@@ -1781,7 +1781,7 @@ async function fetchNewsHeadlines() {
 
   for (const topic of NEWS_TOPICS) {
     try {
-      const url = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-US&gl=US&ceid=US:en&when=1d`;
+      const url = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-US&gl=US&ceid=US:en&when=2d`;
       const res = await fetch(url);
       if (!res.ok) continue;
 
@@ -1828,8 +1828,7 @@ Mix across these categories:
 For each idea, provide:
 1. A one-line hook (the opening line of the post)
 2. The angle in one sentence
-3. Suggested voice: AirOps Brand, Alex, or Christy
-4. If inspired by a news story, include the article title and publication (e.g. "Source: Article Title - Publication Name (publicationurl.com)")
+3. If inspired by a news story, include the article title and publication
 
 Keep it punchy. These are starting points, not finished posts. Be opinionated and specific. No generic topics.`;
 
