@@ -245,6 +245,69 @@ function saveState() {
   }
 }
 
+// ─── Long-term memory ──────────────────────────────────────────────────────
+
+const MEMORY_FILE = path.join(STATE_DIR, 'MEMORY.md');
+
+function loadMemory() {
+  try {
+    if (fs.existsSync(MEMORY_FILE)) {
+      const content = fs.readFileSync(MEMORY_FILE, 'utf8');
+      console.log(`[startup] Loaded memory (${content.length} chars)`);
+      return content;
+    }
+  } catch (err) {
+    console.error('[startup] Failed to load memory:', err.message);
+  }
+  return '';
+}
+
+function addMemory(category, entry) {
+  try {
+    if (!fs.existsSync(STATE_DIR)) fs.mkdirSync(STATE_DIR, { recursive: true });
+
+    let content = '';
+    if (fs.existsSync(MEMORY_FILE)) {
+      content = fs.readFileSync(MEMORY_FILE, 'utf8');
+    }
+
+    const date = new Date().toISOString().split('T')[0];
+    const header = `## ${category}`;
+    const newEntry = `- [${date}] ${entry}`;
+
+    if (content.includes(header)) {
+      // Append under existing category
+      content = content.replace(header, `${header}\n${newEntry}`);
+    } else {
+      // Add new category
+      content += `\n\n${header}\n${newEntry}`;
+    }
+
+    // Trim to last 100 entries to prevent unbounded growth
+    const lines = content.split('\n');
+    const entryLines = lines.filter((l) => l.startsWith('- ['));
+    if (entryLines.length > 100) {
+      const toRemove = entryLines.slice(0, entryLines.length - 100);
+      for (const line of toRemove) {
+        content = content.replace(line + '\n', '');
+      }
+    }
+
+    fs.writeFileSync(MEMORY_FILE, content.trim() + '\n');
+    console.log(`[memory] Added to ${category}: ${entry.slice(0, 80)}...`);
+  } catch (err) {
+    console.error('[memory] Failed to save:', err.message);
+  }
+}
+
+function getMemoryContext() {
+  const memory = loadMemory();
+  if (!memory) return '';
+  // Include last 2000 chars of memory as context
+  const trimmed = memory.length > 2000 ? memory.slice(-2000) : memory;
+  return `\n\nYour long-term memory (things you've learned from past interactions):\n${trimmed}`;
+}
+
 const savedState = loadState();
 const pendingApprovals = new Map(Object.entries(savedState.approvals || {}));
 const reactionApprovalMap = new Map(Object.entries(savedState.reactions || {}));
@@ -773,6 +836,7 @@ async function generateDrafts(postIdea, systemPrompt, notionContext, customPromp
 
     if (qa.fixes && qa.fixes.length > 0) {
       console.log(`[nuggets-agent] QA fixes applied: ${qa.fixes.join('; ')}`);
+      addMemory('QA Patterns Caught', qa.fixes.join('; '));
       drafts.linkedin_post = qa.linkedin_post;
       drafts.blog_draft = qa.blog_draft;
     } else {
@@ -1324,7 +1388,8 @@ slack.message(async ({ message, client }) => {
         if (docs) docsContext = `\n\nRelevant AirOps docs for reference:\n${docs}`;
       }
 
-      const sysPrompt = docsContext ? EDNA_CHAT_SYSTEM_PROMPT + docsContext : EDNA_CHAT_SYSTEM_PROMPT;
+      const memoryContext = getMemoryContext();
+      const sysPrompt = EDNA_CHAT_SYSTEM_PROMPT + memoryContext + docsContext;
 
       const response = await anthropic.messages.create({
         model: 'claude-sonnet-4-20250514',
@@ -1498,7 +1563,7 @@ slack.message(async ({ message, client }) => {
       const response = await anthropic.messages.create({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 1000,
-        system: BRAINSTORM_SYSTEM_PROMPT,
+        system: BRAINSTORM_SYSTEM_PROMPT + getMemoryContext(),
         messages: session.history,
       });
 
@@ -1601,6 +1666,9 @@ async function handleApproval(message, client) {
         ordinalNote = assetIds.length > 0
           ? `\nLinkedIn post queued in Ordinal with ${assetIds.length} image(s).`
           : '\nLinkedIn post queued in Ordinal.';
+
+        // Remember this approved post
+        addMemory('Approved Posts', `"${approval.drafts.title}" - approved and queued in Ordinal. Hook: "${approval.drafts.linkedin_post.split('\n')[0].slice(0, 100)}"`);
       } catch (err) {
         console.error('[nuggets-agent] Ordinal error (non-blocking):', err.message);
         ordinalNote = '\n⚠️ Failed to queue in Ordinal.';
@@ -1740,7 +1808,7 @@ async function sendDailyIdeas() {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 1500,
-      system: DAILY_IDEAS_PROMPT,
+      system: DAILY_IDEAS_PROMPT + getMemoryContext(),
       messages: [{ role: 'user', content: prompt }],
     });
 
