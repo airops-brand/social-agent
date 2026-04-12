@@ -39,6 +39,8 @@ const WATCH_CHANNELS = (process.env.WATCH_CHANNELS || '0-nuggets')
 const ORDINAL_API_KEY = process.env.ORDINAL_API_KEY;
 const ORDINAL_LINKEDIN_PROFILE_ID = process.env.ORDINAL_LINKEDIN_PROFILE_ID || 'a68df3c6-0870-45d0-adfc-a9b3d9917557'; // AirOps
 const ORDINAL_APPROVER_USER_ID = process.env.ORDINAL_APPROVER_USER_ID || 'a32a8b1b-7218-4ca6-bd50-f4649694e1bb'; // Jessica Rosenberg
+const ASANA_TOKEN = process.env.ASANA_TOKEN;
+const ASANA_PROJECT_ID = process.env.ASANA_PROJECT_ID || '1212399031433417'; // Social & Email Board
 
 // Channel → Notion page overrides (format: "channel:pageId,channel:pageId")
 const CHANNEL_NOTION_MAP = {};
@@ -1093,6 +1095,51 @@ async function queueOrdinalPost(title, linkedinPost, assetIds, publishDate) {
   return post.id;
 }
 
+// ─── Core: create Asana task ──────────────────────────────────────────────
+
+async function createAsanaTask(title, postDate, ordinalPostId) {
+  if (!ASANA_TOKEN) return null;
+
+  const ordinalLink = ordinalPostId
+    ? `https://app.tryordinal.com/posts/${ordinalPostId}`
+    : 'Ordinal link not available';
+
+  const taskData = {
+    data: {
+      name: title,
+      projects: [ASANA_PROJECT_ID],
+      notes: `LinkedIn post queued via Edna (Social Agent)\n\nOrdinal: ${ordinalLink}`,
+    },
+  };
+
+  if (postDate) {
+    try {
+      const parsed = new Date(postDate);
+      if (!isNaN(parsed.getTime())) {
+        taskData.data.due_on = parsed.toISOString().split('T')[0];
+      }
+    } catch {}
+  }
+
+  const res = await fetch('https://app.asana.com/api/1.0/tasks', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${ASANA_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(taskData),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Asana API error ${res.status}: ${body}`);
+  }
+
+  const task = await res.json();
+  console.log(`[nuggets-agent] Asana task created: ${task.data.gid}`);
+  return task.data.gid;
+}
+
 // ─── Core: send DM to reviewer ──────────────────────────────────────────────
 
 async function sendReviewDM(notionUrl, originalMessage, originalChannelId, originalMessageTs, channelName, drafts) {
@@ -1669,6 +1716,15 @@ async function handleApproval(message, client) {
 
         // Remember this approved post
         addMemory('Approved Posts', `"${approval.drafts.title}" - approved and queued in Ordinal. Hook: "${approval.drafts.linkedin_post.split('\n')[0].slice(0, 100)}"`);
+
+        // Create Asana task
+        try {
+          const hookLine = approval.drafts.linkedin_post.split('\n')[0].slice(0, 100);
+          await createAsanaTask(hookLine, approval.publishDate, ordinalId);
+          ordinalNote += '\nAdded to Social & Email Board in Asana.';
+        } catch (err) {
+          console.error('[nuggets-agent] Asana error (non-blocking):', err.message);
+        }
       } catch (err) {
         console.error('[nuggets-agent] Ordinal error (non-blocking):', err.message);
         ordinalNote = '\n⚠️ Failed to queue in Ordinal.';
