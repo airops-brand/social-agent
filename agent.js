@@ -1814,6 +1814,43 @@ async function handleApproval(message, client) {
   }
 
   try {
+    // Re-read the Notion page to pick up any manual edits
+    if (approval.notionUrl) {
+      try {
+        const pageIdMatch = approval.notionUrl.match(/([a-f0-9]{32})/);
+        if (pageIdMatch) {
+          const pageId = pageIdMatch[1].replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
+          const blocks = await notion.blocks.children.list({ block_id: pageId, page_size: 100 });
+
+          // Find the latest LinkedIn post draft and blog draft in the page blocks
+          let linkedinText = '';
+          let blogText = '';
+          let currentSection = '';
+
+          for (const block of blocks.results) {
+            if (block.type === 'heading_2' || block.type === 'heading_3') {
+              const heading = (block[block.type]?.rich_text || []).map((t) => t.plain_text).join('').toLowerCase();
+              if (heading.includes('linkedin')) currentSection = 'linkedin';
+              else if (heading.includes('blog')) currentSection = 'blog';
+              else currentSection = '';
+            } else if (block.type === 'paragraph' && currentSection) {
+              const text = (block.paragraph?.rich_text || []).map((t) => t.plain_text).join('');
+              if (currentSection === 'linkedin') linkedinText += (linkedinText ? '\n' : '') + text;
+              else if (currentSection === 'blog') blogText += (blogText ? '\n' : '') + text;
+            }
+          }
+
+          if (linkedinText && approval.drafts) {
+            console.log('[nuggets-agent] Re-read Notion page for latest copy');
+            approval.drafts.linkedin_post = linkedinText;
+            if (blogText) approval.drafts.blog_draft = blogText;
+          }
+        }
+      } catch (err) {
+        console.log('[nuggets-agent] Could not re-read Notion (using stored draft):', err.message);
+      }
+    }
+
     // Upload images to Ordinal (if any), then queue the post
     let ordinalNote = '';
     if (ORDINAL_API_KEY && approval.drafts) {
