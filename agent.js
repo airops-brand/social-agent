@@ -1909,10 +1909,23 @@ function scheduleDailyIdeas() {
 process.on('uncaughtException', (err) => {
   console.error('[nuggets-agent] Uncaught exception:', err.message);
   console.error(err.stack);
+  // Try to notify Jess
+  try {
+    slack.client.chat.postMessage({
+      channel: REVIEWER_SLACK_ID,
+      text: `Edna here. Something broke and I had to catch myself.\n\nError: ${err.message}\n\nI'm still running, but worth checking the Railway logs.`,
+    }).catch(() => {});
+  } catch {}
 });
 
 process.on('unhandledRejection', (err) => {
   console.error('[nuggets-agent] Unhandled rejection:', err.message || err);
+  try {
+    slack.client.chat.postMessage({
+      channel: REVIEWER_SLACK_ID,
+      text: `Edna here. Caught an unhandled error.\n\nError: ${err.message || err}\n\nStill running. Check Railway if this keeps happening.`,
+    }).catch(() => {});
+  } catch {}
 });
 
 // ─── Start ──────────────────────────────────────────────────────────────────
