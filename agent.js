@@ -1870,9 +1870,20 @@ async function sendDailyIdeas() {
 
     const ideas = response.content.find((b) => b.type === 'text')?.text || 'No ideas today.';
 
+    // Build news digest with links
+    let newsDigest = '';
+    if (headlines.length > 0) {
+      newsDigest = '\n\n---\n*Today\'s headlines I scanned:*\n';
+      for (const { topic, headlines: items } of headlines) {
+        for (const item of items) {
+          newsDigest += `- ${item.title} (${item.sourceName}) ${item.sourceUrl}\n`;
+        }
+      }
+    }
+
     await slack.client.chat.postMessage({
       channel: REVIEWER_SLACK_ID,
-      text: `*Good morning! Here are today's post ideas:*\n\n${ideas}\n\n_Reply with a number to draft it, or DM me to brainstorm more._`,
+      text: `*Good morning. Your daily post ideas.*\n\n${ideas}\n\n_Reply with a number to draft it, or DM me to brainstorm._${newsDigest}`,
     });
 
     console.log('[nuggets-agent] Daily ideas sent to Jess.');
