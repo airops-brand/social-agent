@@ -206,7 +206,7 @@ function buildFormPrompt(fields) {
   if (audience) prompt += `TARGET AUDIENCE: ${audience}\n`;
   if (imageDesc) prompt += `IMAGE NOTES: ${imageDesc}\n`;
 
-  const publishDate = fields['preferred post date'] || fields['post date'] || fields['date'] || '';
+  const publishDate = fields['preferred post date'] || fields['desired publish date'] || fields['post date'] || fields['date'] || '';
   if (publishDate) prompt += `PREFERRED POST DATE: ${publishDate}\n`;
 
   const allText = Object.values(fields).join(' ') + ' ' + notionLink;
