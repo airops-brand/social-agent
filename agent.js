@@ -1903,6 +1903,18 @@ function scheduleDailyIdeas() {
   console.log('[startup] Daily ideas scheduler active (9:00 AM CT)');
 }
 
+// ─── Error handling ────────────────────────────────────────────────────────
+
+// Catch unhandled errors so the process doesn't crash
+process.on('uncaughtException', (err) => {
+  console.error('[nuggets-agent] Uncaught exception:', err.message);
+  console.error(err.stack);
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('[nuggets-agent] Unhandled rejection:', err.message || err);
+});
+
 // ─── Start ──────────────────────────────────────────────────────────────────
 
 (async () => {
