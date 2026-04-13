@@ -1362,7 +1362,15 @@ slack.message(async ({ message, client }) => {
   const draftCtx = threadDrafts.get(threadKey);
   if (!draftCtx) return; // not a thread we're tracking
 
-  const feedback = message.text;
+  const feedback = (message.text || '').trim();
+
+  // Skip if the message tags someone (people chatting, not talking to Edna)
+  if (feedback.match(/<@U[A-Z0-9]+>/)) return;
+
+  // Skip if it looks like a short conversational reply, not revision feedback
+  const lower = feedback.toLowerCase();
+  if (['thanks', 'thank you', 'ok', 'got it', 'sounds good', 'nice', 'cool', 'lol', 'haha', 'yes', 'no', 'yep', 'nope', 'agreed', 'perfect'].includes(lower)) return;
+
   console.log(`[nuggets-agent] Thread revision request: "${feedback.slice(0, 80)}..."`);
 
   try {
