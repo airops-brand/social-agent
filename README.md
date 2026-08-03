@@ -57,6 +57,7 @@ Edna can:
 - Turn rough ideas or structured briefs into LinkedIn posts and companion blog drafts
 - Use accessible Notion pages, selected public web pages, AirOps docs, and recent news as context
 - Apply a dedicated QA pass and remember recurring QA fixes
+- Automatically select the newest Claude Sonnet model available to the configured Anthropic API key, refreshing every six hours
 - Learn patterns from approved posts through persistent long-term memory
 - Send Jess five daily post ideas at 9:00 a.m. CT, informed by recent Google News headlines and AirOps product context
 - Preserve pending approvals across Railway restarts
@@ -135,6 +136,7 @@ Enable Socket Mode and generate an App-Level Token with `connections:write` scop
 | `SLACK_APP_TOKEN` | Slack app-level token for Socket Mode (`xapp-...`) |
 | `NOTION_TOKEN` | Notion integration token |
 | `ANTHROPIC_API_KEY` | Claude API key |
+| `ANTHROPIC_MODEL` | Optional model override; leave unset to auto-select the newest available Claude Sonnet model |
 | `WATCH_CHANNELS` | Comma-separated channel names (`0-nuggets,social-workflow`) |
 | `CHANNEL_NOTION_MAP` | Channel-to-Notion-page mapping (`social-workflow:33b1f419...`) |
 | `CHANNEL_PROMPT_MAP` | Channel-to-voice mapping (`social-workflow:airops`) |

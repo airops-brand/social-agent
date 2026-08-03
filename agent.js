@@ -41,6 +41,9 @@ const ORDINAL_LINKEDIN_PROFILE_ID = process.env.ORDINAL_LINKEDIN_PROFILE_ID || '
 const ORDINAL_APPROVER_USER_ID = process.env.ORDINAL_APPROVER_USER_ID || 'a32a8b1b-7218-4ca6-bd50-f4649694e1bb'; // Jessica Rosenberg
 const ASANA_TOKEN = process.env.ASANA_TOKEN;
 const ASANA_PROJECT_ID = process.env.ASANA_PROJECT_ID || '1212399031433417'; // Social & Email Board
+const ANTHROPIC_MODEL_OVERRIDE = (process.env.ANTHROPIC_MODEL || '').trim();
+const ANTHROPIC_MODEL_FALLBACK = 'claude-sonnet-5';
+const ANTHROPIC_MODEL_CACHE_MS = 6 * 60 * 60 * 1000;
 
 // Channel → Notion page overrides (format: "channel:pageId,channel:pageId")
 const CHANNEL_NOTION_MAP = {};
@@ -76,6 +79,76 @@ const slack = new App({
 
 const notion = new NotionClient({ auth: process.env.NOTION_TOKEN });
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+let anthropicModelCache = { id: null, expiresAt: 0 };
+
+async function discoverAnthropicModel(forceRefresh = false) {
+  if (ANTHROPIC_MODEL_OVERRIDE) return ANTHROPIC_MODEL_OVERRIDE;
+
+  const now = Date.now();
+  if (!forceRefresh && anthropicModelCache.id && anthropicModelCache.expiresAt > now) {
+    return anthropicModelCache.id;
+  }
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/models?limit=100', {
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Anthropic models API returned ${response.status}`);
+    }
+
+    const body = await response.json();
+    const model = (body.data || []).find((item) => item.id?.startsWith('claude-sonnet-'))?.id;
+
+    if (!model) {
+      throw new Error('No Claude Sonnet model is available to this API key');
+    }
+
+    anthropicModelCache = {
+      id: model,
+      expiresAt: now + ANTHROPIC_MODEL_CACHE_MS,
+    };
+    console.log(`[startup] Anthropic model selected: ${model}`);
+    return model;
+  } catch (err) {
+    if (anthropicModelCache.id) {
+      console.error(`[nuggets-agent] Model refresh failed; keeping ${anthropicModelCache.id}:`, err.message);
+      return anthropicModelCache.id;
+    }
+
+    anthropicModelCache = {
+      id: ANTHROPIC_MODEL_FALLBACK,
+      expiresAt: now + (5 * 60 * 1000),
+    };
+    console.error(`[nuggets-agent] Model discovery failed; using ${ANTHROPIC_MODEL_FALLBACK}:`, err.message);
+    return ANTHROPIC_MODEL_FALLBACK;
+  }
+}
+
+async function createAnthropicMessage(params) {
+  const model = await discoverAnthropicModel();
+
+  try {
+    return await anthropic.messages.create({ ...params, model });
+  } catch (err) {
+    if (!ANTHROPIC_MODEL_OVERRIDE && err.status === 404) {
+      anthropicModelCache = { id: null, expiresAt: 0 };
+      const refreshedModel = await discoverAnthropicModel(true);
+
+      if (refreshedModel !== model) {
+        console.log(`[nuggets-agent] Retrying Anthropic request with ${refreshedModel}`);
+        return anthropic.messages.create({ ...params, model: refreshedModel });
+      }
+    }
+
+    throw err;
+  }
+}
 
 // ─── Notion content fetching ───────────────────────────────────────────────
 
@@ -804,8 +877,7 @@ async function generateDrafts(postIdea, systemPrompt, notionContext, customPromp
     }
   }
 
-  const message = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
+  const message = await createAnthropicMessage({
     max_tokens: 2000,
     system: systemPrompt,
     messages: [
@@ -823,8 +895,7 @@ async function generateDrafts(postIdea, systemPrompt, notionContext, customPromp
 
   // QA review pass - check for banned patterns and rewrite
   try {
-    const qaMessage = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+    const qaMessage = await createAnthropicMessage({
       max_tokens: 2000,
       system: QA_SYSTEM_PROMPT,
       messages: [
@@ -1680,8 +1751,7 @@ slack.message(async ({ message, client }) => {
       const memoryContext = getMemoryContext();
       const sysPrompt = EDNA_CHAT_SYSTEM_PROMPT + memoryContext + docsContext;
 
-      const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+      const response = await createAnthropicMessage({
         max_tokens: 1000,
         system: sysPrompt,
         messages: session.history,
@@ -1852,8 +1922,7 @@ slack.message(async ({ message, client }) => {
       // Add to conversation history
       session.history.push({ role: 'user', content: text });
 
-      const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+      const response = await createAnthropicMessage({
         max_tokens: 1000,
         system: BRAINSTORM_SYSTEM_PROMPT + getMemoryContext(),
         messages: session.history,
@@ -2151,8 +2220,7 @@ async function sendDailyIdeas() {
       prompt += `\nRECENT AIROPS PRODUCT CONTEXT:\n${docsContext}`;
     }
 
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+    const response = await createAnthropicMessage({
       max_tokens: 1500,
       system: DAILY_IDEAS_PROMPT + getMemoryContext(),
       messages: [{ role: 'user', content: prompt }],
@@ -2232,6 +2300,7 @@ process.on('unhandledRejection', (err) => {
 // ─── Start ──────────────────────────────────────────────────────────────────
 
 (async () => {
+  await discoverAnthropicModel();
   await slack.start();
   scheduleDailyIdeas();
   console.log('⚡ Nuggets agent is running');
