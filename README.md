@@ -15,7 +15,7 @@ Edna watches the channels listed in `WATCH_CHANNELS`. The documented setup uses 
    - Responds to regular channel messages containing “post idea,” including variants such as `post-idea` and `#post-idea`
 2. **Builds the brief**
    - Reads the topic, post type, context, audience, Notion link, image notes, attached images, and preferred publish date from the form
-   - Pulls accessible Notion pages into the working context
+   - Pulls accessible Notion pages and public web URLs into the working context
    - Uses the voice and Notion destination configured for the channel
 3. **Creates and reviews the copy**
    - Generates a LinkedIn post and companion blog draft
@@ -23,8 +23,9 @@ Edna watches the channels listed in `WATCH_CHANNELS`. The documented setup uses 
    - Saves the result to the channel's configured Notion page
 4. **Collaborates in the request thread**
    - Posts the Notion link in the original Slack thread
-   - Accepts revision feedback in that thread
-   - Can use accessible Notion links and public web URLs included in revision feedback as context
+   - Understands substantive replies using the full thread context
+   - Revises the stored draft when asked, or answers questions and performs supported content tasks in the thread
+   - Can use accessible Notion links and public web URLs included in the original brief or a reply as context
 5. **Routes and approves the draft**
    - Records the original submitter as the sole approver
    - Lets that submitter approve their draft with 👍 or an `approved` reply
@@ -205,7 +206,7 @@ Slack (Socket Mode)
   |-- Channel messages ("post idea" trigger)
   |-- Workflow Builder form submissions
   |-- DM conversations (menu, voice picker, brainstorm, chat)
-  |-- Thread replies (draft revisions)
+  |-- Thread replies (intent-routed revisions, questions, and content tasks)
   |-- Thumbs-up reactions (approval)
   |
 Node.js Agent (Railway)

@@ -32,6 +32,14 @@ const { OrdinalMcpIntegration } = require('./ordinal-mcp');
 const { findHeadingBlockId, notionBlockUrl } = require('./notion-links');
 const { postSignedOrdinalUpload } = require('./ordinal-upload');
 const { removeHashtags } = require('./draft-cleanup');
+const {
+  cleanThreadRequest,
+  formatThreadTranscript,
+  isConversationalReply,
+  isDirectedAtEdna,
+  threadIncludesEdna,
+} = require('./slack-thread-routing');
+const { extractWebUrls, fetchWebPageContext } = require('./web-context');
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
@@ -255,6 +263,32 @@ async function fetchNotionPageContent(pageId) {
     console.error(`[nuggets-agent] Failed to fetch Notion page ${pageId}:`, err.message);
     return null;
   }
+}
+
+async function fetchLinkedWebContexts(text, maxPages = 4) {
+  const urls = extractWebUrls(text)
+    .filter((url) => !/notion\.(?:so|site)/i.test(url))
+    .slice(0, maxPages);
+  const contexts = [];
+
+  for (const url of urls) {
+    try {
+      const page = await fetchWebPageContext(url);
+      contexts.push({
+        title: `Web page: ${page.title}`,
+        content: [
+          `Source: ${page.url}`,
+          page.description && `Description: ${page.description}`,
+          `Page text: ${page.content}`,
+        ].filter(Boolean).join('\n'),
+      });
+      console.log(`[nuggets-agent] Extracted web context from ${url} (${page.content.length} chars)`);
+    } catch (err) {
+      console.error(`[nuggets-agent] Could not read web context from ${url}:`, err.message);
+    }
+  }
+
+  return contexts;
 }
 
 // ─── AirOps docs search ───────────────────────────────────────────────────
@@ -928,7 +962,7 @@ async function generateDrafts(postIdea, systemPrompt, notionContext, customPromp
   if (notionContext && notionContext.length > 0) {
     const parts = userContent.split('\nPlease write the LinkedIn post');
     userContent = parts[0];
-    userContent += '\n\nThe following Notion pages were shared as additional context:\n';
+    userContent += '\n\nThe following reference sources were shared as additional context:\n';
     for (const doc of notionContext) {
       userContent += `\n--- "${doc.title}" ---\n${doc.content}\n`;
     }
@@ -1341,6 +1375,7 @@ slack.event('message', async ({ event, client }) => {
       const doc = await fetchNotionPageContent(pid);
       if (doc) notionContext.push(doc);
     }
+    notionContext.push(...await fetchLinkedWebContexts(allText));
 
     // 3. Generate drafts with structured form data
     const systemPrompt = getSystemPrompt(channelName);
@@ -1407,6 +1442,7 @@ slack.event('message', async ({ event, client }) => {
 slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
   if (message.bot_id || message.subtype) return;
   if (message.channel_type === 'im') return; // DMs handled separately
+  if (message.thread_ts) return; // Thread replies are routed by the thread agent below.
 
   // Confirm we're in a watched channel
   let channelName = 'unknown';
@@ -1436,8 +1472,9 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
       const doc = await fetchNotionPageContent(pid);
       if (doc) notionContext.push(doc);
     }
+    notionContext.push(...await fetchLinkedWebContexts(postIdea));
     if (notionContext.length > 0) {
-      console.log(`[nuggets-agent] Fetched ${notionContext.length} Notion page(s) for context`);
+      console.log(`[nuggets-agent] Fetched ${notionContext.length} reference source(s) for context`);
     }
 
     // 3. Generate drafts
@@ -1490,22 +1527,165 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
 
 // ─── Slack event: thread replies for draft revisions ──────────────────────
 
+let ednaBotUserIdCache = null;
+
+async function getEdnaBotUserId(client) {
+  if (ednaBotUserIdCache) return ednaBotUserIdCache;
+  try {
+    const auth = await client.auth.test();
+    ednaBotUserIdCache = auth.user_id || null;
+  } catch (err) {
+    console.error('[nuggets-agent] Could not resolve Edna bot user ID:', err.message);
+  }
+  return ednaBotUserIdCache;
+}
+
+async function getSlackThreadMessages(client, channel, threadTs) {
+  try {
+    const messages = [];
+    let cursor;
+    let pages = 0;
+    do {
+      const response = await client.conversations.replies({
+        channel,
+        ts: threadTs,
+        limit: 100,
+        cursor,
+      });
+      messages.push(...(response.messages || []));
+      cursor = response.response_metadata?.next_cursor || '';
+      pages += 1;
+    } while (cursor && pages < 3);
+    return messages;
+  } catch (err) {
+    console.error('[nuggets-agent] Could not load Slack thread context:', err.message);
+    return [];
+  }
+}
+
+async function classifyThreadIntent(feedback, draftCtx, threadMessages, ednaUserId) {
+  try {
+    const result = await createAnthropicJson({
+      label: 'Slack thread intent',
+      max_tokens: 250,
+      system: `Classify a Slack reply to Edna about an existing social post draft.
+
+Return revision when the user asks to change, rewrite, add, remove, shorten, expand, or otherwise modify the stored draft.
+Return respond when the user asks a question, requests advice, wants analysis, asks for options without changing the stored draft, or makes another request Edna can answer in the thread.
+Return ignore only for chatter that does not ask Edna to do anything.
+
+Return only JSON: {"intent":"revision|respond|ignore"}`,
+      messages: [{
+        role: 'user',
+        content: `Current LinkedIn draft:\n${draftCtx.drafts.linkedin_post}\n\nThread:\n${formatThreadTranscript(threadMessages, ednaUserId)}\n\nLatest reply:\n${feedback}`,
+      }],
+      validate: (value) => ['revision', 'respond', 'ignore'].includes(value?.intent),
+    });
+    return result.intent;
+  } catch (err) {
+    console.error('[nuggets-agent] Thread intent classification failed:', err.message);
+    return /\b(revise|rewrite|change|edit|update|shorten|expand|remove|add|replace|make it|include|cut)\b/i.test(feedback)
+      ? 'revision'
+      : 'respond';
+  }
+}
+
+async function handleGeneralThreadRequest({
+  message,
+  client,
+  feedback,
+  threadMessages,
+  ednaUserId,
+  draftCtx = null,
+}) {
+  try {
+    const references = [];
+    for (const pageId of extractNotionPageIds(feedback)) {
+      const page = await fetchNotionPageContent(pageId);
+      if (page) references.push(page);
+    }
+    references.push(...await fetchLinkedWebContexts(feedback));
+
+    let docsContext = '';
+    if (/\b(airops|page360|brand kit|aeo|workflow|grid|citation|content engineering)\b/i.test(feedback)) {
+      const docs = await searchAirOpsDocs(feedback.slice(0, 120));
+      if (docs) docsContext = `\n\nAirOps documentation:\n${docs}`;
+    }
+
+    const referenceContext = references.length
+      ? `\n\nReferenced sources:\n${references.map((item) => `--- ${item.title} ---\n${item.content}`).join('\n\n')}`
+      : '';
+    const draftContext = draftCtx
+      ? `\n\nCurrent stored draft:\n${draftCtx.drafts.linkedin_post}`
+      : '';
+
+    const response = await createAnthropicMessage({
+      max_tokens: 1800,
+      system: `${EDNA_CHAT_SYSTEM_PROMPT}\n\nSLACK THREAD MODE:
+- Use the full thread to understand what the latest user is referring to.
+- Fulfill the latest request now when it is a question, analysis, brainstorm, rewrite shown in chat, or content request.
+- Be concise and answer in the same thread.
+- Do not claim you changed Notion, Ordinal, Slack settings, or another external system unless the supplied context explicitly confirms it.
+- If an unsupported external action is requested, state the limitation and give the exact next step.`,
+      messages: [{
+        role: 'user',
+        content: `Slack thread:\n${formatThreadTranscript(threadMessages, ednaUserId)}\n\nLatest request:\n${feedback}${draftContext}${referenceContext}${docsContext}`,
+      }],
+    });
+    const reply = response.content.find((block) => block.type === 'text')?.text || 'I could not complete that. Try again.';
+    await client.chat.postMessage({
+      channel: message.channel,
+      thread_ts: message.thread_ts,
+      text: reply,
+    });
+  } catch (err) {
+    console.error('[nuggets-agent] General thread request failed:', err);
+    await client.chat.postMessage({
+      channel: message.channel,
+      thread_ts: message.thread_ts,
+      text: 'I could not complete that request. Try again with the specific outcome you want.',
+    });
+  }
+}
+
 slack.message(async ({ message, client }) => {
   // Only handle thread replies in channels (not DMs, not top-level)
   if (message.bot_id || message.subtype) return;
   if (message.channel_type === 'im') return;
   if (!message.thread_ts) return; // must be a thread reply
 
+  const ednaUserId = await getEdnaBotUserId(client);
+  if (!isDirectedAtEdna(message.text, ednaUserId)) return;
+
+  const feedback = cleanThreadRequest(message.text, ednaUserId);
+  if (!feedback || isConversationalReply(feedback)) return;
+
   const threadKey = `${message.channel}:${message.thread_ts}`;
-  const draftCtx = threadDrafts.get(threadKey);
-  if (!draftCtx) return; // not a thread we're tracking
+  let draftCtx = threadDrafts.get(threadKey) || null;
+  const threadMessages = await getSlackThreadMessages(client, message.channel, message.thread_ts);
 
-  const feedback = (message.text || '').trim();
+  // Rebuild revision context from persisted approvals after a deployment.
+  if (!draftCtx) {
+    const persistedApproval = findLatestPendingApproval((approval) => (
+      approval.originalChannelId === message.channel
+      && approval.originalMessageTs === message.thread_ts
+    ));
+    if (persistedApproval) {
+      const approval = persistedApproval[1];
+      draftCtx = {
+        originalIdea: threadMessages[0]?.text || 'Slack thread draft request',
+        drafts: approval.drafts,
+        systemPrompt: getSystemPrompt(approval.channelName || 'unknown'),
+        channelName: approval.channelName || 'unknown',
+        notionPageId: getNotionPageId(approval.channelName || 'unknown'),
+      };
+      threadDrafts.set(threadKey, draftCtx);
+    }
+  }
 
-  // Skip if the message tags someone (people chatting, not talking to Edna)
-  if (feedback.match(/<@U[A-Z0-9]+>/)) return;
+  // For untracked threads, only respond when Edna has already participated.
+  if (!draftCtx && !threadIncludesEdna(threadMessages, ednaUserId)) return;
 
-  // Skip if it looks like a short conversational reply, not revision feedback
   const lower = feedback.toLowerCase();
 
   if (lower === 'approved' || lower === 'approve') {
@@ -1533,7 +1713,28 @@ slack.message(async ({ message, client }) => {
     }
   }
 
-  if (['thanks', 'thank you', 'ok', 'got it', 'sounds good', 'nice', 'cool', 'lol', 'haha', 'yes', 'no', 'yep', 'nope', 'agreed', 'perfect'].includes(lower)) return;
+  if (!draftCtx) {
+    return handleGeneralThreadRequest({
+      message,
+      client,
+      feedback,
+      threadMessages,
+      ednaUserId,
+    });
+  }
+
+  const threadIntent = await classifyThreadIntent(feedback, draftCtx, threadMessages, ednaUserId);
+  if (threadIntent === 'ignore') return;
+  if (threadIntent === 'respond') {
+    return handleGeneralThreadRequest({
+      message,
+      client,
+      feedback,
+      threadMessages,
+      ednaUserId,
+      draftCtx,
+    });
+  }
 
   console.log(`[nuggets-agent] Thread revision request: "${feedback.slice(0, 80)}..."`);
 
@@ -1552,31 +1753,10 @@ slack.message(async ({ message, client }) => {
       if (doc) notionContext.push(doc);
     }
 
-    // Fetch web URLs for context
-    let webContext = '';
-    const urlMatch = feedback.match(/https?:\/\/[^\s>]+/g);
-    if (urlMatch) {
-      for (const url of urlMatch) {
-        if (url.includes('notion.so')) continue; // already handled
-        try {
-          const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-          if (res.ok) {
-            const html = await res.text();
-            // Extract text content roughly
-            const textContent = html.replace(/<script[\s\S]*?<\/script>/gi, '')
-              .replace(/<style[\s\S]*?<\/style>/gi, '')
-              .replace(/<[^>]+>/g, ' ')
-              .replace(/\s+/g, ' ')
-              .trim()
-              .slice(0, 3000);
-            webContext += `\n\nContent from ${url}:\n${textContent}`;
-          }
-        } catch {}
-      }
-    }
+    notionContext.push(...await fetchLinkedWebContexts(feedback));
 
     // Build revision prompt with previous draft + feedback
-    const revisionPrompt = `Here is the original post idea:\n"${draftCtx.originalIdea}"\n\nHere is the current LinkedIn draft:\n"${draftCtx.drafts.linkedin_post}"\n\nHere is the current blog draft:\n"${draftCtx.drafts.blog_draft}"\n\nThe user wants this revision:\n"${feedback}"\n${webContext}\n\nPlease rewrite the LinkedIn post and blog draft incorporating this feedback. Return only valid JSON, no markdown fences, no preamble.`;
+    const revisionPrompt = `Here is the original post idea:\n"${draftCtx.originalIdea}"\n\nHere is the current LinkedIn draft:\n"${draftCtx.drafts.linkedin_post}"\n\nHere is the current blog draft:\n"${draftCtx.drafts.blog_draft}"\n\nThe user wants this revision:\n"${feedback}"\n\nPlease rewrite the LinkedIn post and blog draft incorporating this feedback and the provided reference sources. Return only valid JSON, no markdown fences, no preamble.`;
 
     const revisedDrafts = await generateDrafts(
       draftCtx.originalIdea,
@@ -1904,6 +2084,7 @@ slack.message(async ({ message, client }) => {
         const doc = await fetchNotionPageContent(pid);
         if (doc) notionContext.push(doc);
       }
+      notionContext.push(...await fetchLinkedWebContexts(postIdea));
 
       const systemPrompt = await fetchVoicePrompt(voiceKey);
       const drafts = await generateDrafts(postIdea, systemPrompt || AIROPS_BRAND_SYSTEM_PROMPT, notionContext);
