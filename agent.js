@@ -28,6 +28,7 @@ console.log('[startup] ANTHROPIC_API_KEY set:', !!process.env.ANTHROPIC_API_KEY)
 const { App } = require('@slack/bolt');
 const { Client: NotionClient } = require('@notionhq/client');
 const Anthropic = require('@anthropic-ai/sdk');
+const { OrdinalMcpIntegration } = require('./ordinal-mcp');
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
@@ -36,7 +37,7 @@ const DEFAULT_NOTION_PAGE_ID = '3371f419db8a810ab58addb600085f6c'; // Nuggets (d
 const WATCH_CHANNELS = (process.env.WATCH_CHANNELS || '0-nuggets')
   .split(',')
   .map((c) => c.trim().replace(/^#/, ''));
-const ORDINAL_API_KEY = process.env.ORDINAL_API_KEY;
+const ORDINAL_WORKSPACE_SLUG = process.env.ORDINAL_WORKSPACE_SLUG || '';
 const ORDINAL_LINKEDIN_PROFILE_ID = process.env.ORDINAL_LINKEDIN_PROFILE_ID || 'a68df3c6-0870-45d0-adfc-a9b3d9917557'; // AirOps
 const ASANA_TOKEN = process.env.ASANA_TOKEN;
 const ASANA_PROJECT_ID = process.env.ASANA_PROJECT_ID || '1212399031433417'; // Social & Email Board
@@ -79,6 +80,7 @@ const slack = new App({
 
 const notion = new NotionClient({ auth: process.env.NOTION_TOKEN });
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const ordinal = new OrdinalMcpIntegration();
 
 let anthropicModelCache = { id: null, expiresAt: 0 };
 
@@ -1067,32 +1069,19 @@ async function appendToNotionPage(title, linkedinPost, blogDraft, originalMessag
 // ─── Core: Ordinal MCP helper ─────────────────────────────────────────────
 
 async function ordinalMcpCall(toolName, args) {
-  const res = await fetch('https://app.tryordinal.com/api/mcp', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${ORDINAL_API_KEY}`,
-      'Content-Type': 'application/json',
-      'Accept': 'application/json, text/event-stream',
-    },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: Date.now(),
-      method: 'tools/call',
-      params: { name: toolName, arguments: args },
-    }),
-  });
-
-  const raw = await res.text();
-  // Parse SSE response
-  for (const line of raw.split('\n')) {
-    if (line.startsWith('data: ')) {
-      const data = JSON.parse(line.slice(6));
-      if (data.error) throw new Error(`Ordinal MCP error: ${JSON.stringify(data.error)}`);
-      const text = data.result?.content?.[0]?.text;
-      return text ? JSON.parse(text) : data.result;
-    }
+  if (!ORDINAL_WORKSPACE_SLUG) {
+    throw new Error('ORDINAL_WORKSPACE_SLUG is not configured');
   }
-  throw new Error('No response from Ordinal MCP');
+  return ordinal.callTool(toolName, { workspaceSlug: ORDINAL_WORKSPACE_SLUG, ...args });
+}
+
+function ordinalEntityId(result, entityName) {
+  const id = result?.id
+    || result?.data?.id
+    || result?.[entityName]?.id
+    || result?.data?.[entityName]?.id;
+  if (!id) throw new Error(`Ordinal did not return a ${entityName} ID`);
+  return id;
 }
 
 // ─── Core: upload image to Ordinal ────────────────────────────────────────
@@ -1148,14 +1137,14 @@ async function uploadToOrdinal(fileId) {
   console.log(`[nuggets-agent] Temp hosted URL: ${tmpUrl}`);
 
   // Step 4: Upload to Ordinal using the public temp URL
-  const upload = await ordinalMcpCall('uploads-create', { url: tmpUrl });
+  const upload = await ordinalMcpCall('ordinal_create_upload', { url: tmpUrl });
   console.log(`[nuggets-agent] Ordinal upload created: ${JSON.stringify(upload)}`);
-  const uploadId = upload.id;
+  const uploadId = ordinalEntityId(upload, 'upload');
 
   // Step 5: Poll for completion
   for (let i = 0; i < 15; i++) {
     await new Promise((r) => setTimeout(r, 2000));
-    const status = await ordinalMcpCall('uploads-get', { id: uploadId });
+    const status = await ordinalMcpCall('ordinal_get_upload', { id: uploadId });
     console.log(`[nuggets-agent] Upload status: ${JSON.stringify(status)}`);
     if (status.assetId) return status.assetId;
     if (status.status === 'ready' && status.assetId) return status.assetId;
@@ -1206,8 +1195,8 @@ async function queueOrdinalPost(title, linkedinPost, assetIds, publishDate) {
     args.linkedIn.assetIds = assetIds;
   }
 
-  const post = await ordinalMcpCall('posts-create', args);
-  return post.id;
+  const post = await ordinalMcpCall('ordinal_create_post', args);
+  return ordinalEntityId(post, 'post');
 }
 
 // ─── Core: create Asana task ──────────────────────────────────────────────
@@ -2096,7 +2085,8 @@ async function handleApproval(message, client) {
 
     // Upload images to Ordinal (if any), then queue the post
     let ordinalNote = '';
-    if (ORDINAL_API_KEY && approval.drafts) {
+    let ordinalQueued = false;
+    if (ordinal.isConfigured() && approval.drafts) {
       try {
         // Upload any attached images first
         const assetIds = [];
@@ -2107,13 +2097,15 @@ async function handleApproval(message, client) {
               if (assetId) assetIds.push(assetId);
               console.log(`[nuggets-agent] Uploaded image to Ordinal: ${assetId}`);
             } catch (err) {
-              console.error('[nuggets-agent] Image upload error (non-blocking):', err.message);
+              console.error('[nuggets-agent] Image upload error:', err.message);
+              throw err;
             }
           }
         }
 
         const ordinalId = await queueOrdinalPost(approval.drafts.title, approval.drafts.linkedin_post, assetIds, approval.publishDate);
         console.log(`[nuggets-agent] Queued in Ordinal: ${ordinalId}`);
+        ordinalQueued = true;
         ordinalNote = assetIds.length > 0
           ? `\nLinkedIn post queued in Ordinal with ${assetIds.length} image(s).`
           : '\nLinkedIn post queued in Ordinal.';
@@ -2130,7 +2122,7 @@ async function handleApproval(message, client) {
           console.error('[nuggets-agent] Asana error (non-blocking):', err.message);
         }
       } catch (err) {
-        console.error('[nuggets-agent] Ordinal error (non-blocking):', err.message);
+        console.error('[nuggets-agent] Ordinal error:', err.message);
         ordinalNote = '\n⚠️ Failed to queue in Ordinal.';
       }
     }
@@ -2139,7 +2131,9 @@ async function handleApproval(message, client) {
       await client.chat.postMessage({
         channel: approval.originalChannelId,
         thread_ts: approval.originalMessageTs,
-        text: `Whoohoo! Getting this queued up in Ordinal.${ordinalNote}`,
+        text: ordinalQueued
+          ? `Whoohoo! This is queued in Ordinal.${ordinalNote}`
+          : `Approved, but I couldn't queue this in Ordinal. I kept the approval pending so you can retry once Ordinal is connected.${ordinalNote}`,
       });
 
       console.log(`[nuggets-agent] Approval confirmed in #${approval.channelName} thread.`);
@@ -2147,17 +2141,21 @@ async function handleApproval(message, client) {
       await client.chat.postMessage({
         channel: approval.originalChannelId,
         thread_ts: approval.originalMessageTs,
-        text: `Whoohoo! Getting this queued up in Ordinal.${ordinalNote}`,
+        text: ordinalQueued
+          ? `Whoohoo! This is queued in Ordinal.${ordinalNote}`
+          : `Approved, but I couldn't queue this in Ordinal. I kept the approval pending so you can retry once Ordinal is connected.${ordinalNote}`,
       });
 
       console.log(`[nuggets-agent] Notified DM submitter ${approval.submitterUserId}.`);
     }
 
-    pendingApprovals.delete(approvalKey);
+    if (ordinalQueued) {
+      pendingApprovals.delete(approvalKey);
 
-    // Clean up reaction map entries pointing to this approval
-    for (const [rKey, rVal] of reactionApprovalMap.entries()) {
-      if (rVal === approvalKey) reactionApprovalMap.delete(rKey);
+      // Clean up reaction map entries pointing to this approval
+      for (const [rKey, rVal] of reactionApprovalMap.entries()) {
+        if (rVal === approvalKey) reactionApprovalMap.delete(rKey);
+      }
     }
     saveState();
   } catch (err) {
@@ -2344,6 +2342,7 @@ process.on('unhandledRejection', (err) => {
 // ─── Start ──────────────────────────────────────────────────────────────────
 
 (async () => {
+  ordinal.startHttpServer();
   await discoverAnthropicModel();
   await slack.start();
   scheduleDailyIdeas();

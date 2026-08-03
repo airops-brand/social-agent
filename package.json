@@ -3,12 +3,17 @@
   "version": "1.0.0",
   "description": "Slack → Claude → Notion → Slack approval loop for AirOps post ideas",
   "main": "agent.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node agent.js",
-    "dev": "node --watch agent.js"
+    "dev": "node --watch agent.js",
+    "test": "node --test"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.20.0",
+    "@modelcontextprotocol/client": "^2.0.0",
     "@notionhq/client": "^2.2.15",
     "@slack/bolt": "^3.18.0",
     "dotenv": "^16.4.5"

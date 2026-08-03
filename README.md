@@ -116,7 +116,7 @@ Edna's cross-platform guidance is grounded in durable B2B principles and the pla
 - Slack App with Socket Mode
 - Notion integration token
 - Anthropic API key
-- Ordinal API key
+- Ordinal Pro workspace access for the OAuth MCP connection
 - Asana personal access token
 
 ---
@@ -147,7 +147,11 @@ Enable Socket Mode and generate an App-Level Token with `connections:write` scop
 | `WATCH_CHANNELS` | Comma-separated channel names (`0-nuggets,social-workflow`) |
 | `CHANNEL_NOTION_MAP` | Channel-to-Notion-page mapping (`social-workflow:33b1f419...`) |
 | `CHANNEL_PROMPT_MAP` | Channel-to-voice mapping (`social-workflow:airops`) |
-| `ORDINAL_API_KEY` | Ordinal API bearer token |
+| `ORDINAL_OAUTH_BASE_URL` | Public Railway service URL used for the OAuth callback |
+| `ORDINAL_OAUTH_ENCRYPTION_KEY` | Base64 32-byte key that encrypts OAuth credentials on the Railway volume |
+| `ORDINAL_OAUTH_SETUP_TOKEN` | Secret protecting the one-time OAuth setup route |
+| `ORDINAL_OAUTH_STORE` | Credential file path on the Railway volume (defaults to `$STATE_DIR/ordinal-oauth.enc.json`) |
+| `ORDINAL_WORKSPACE_SLUG` | AirOps workspace slug returned by `ordinal_get_workspace_context` |
 | `ORDINAL_LINKEDIN_PROFILE_ID` | AirOps LinkedIn profile UUID in Ordinal |
 | `ASANA_TOKEN` | Asana personal access token |
 | `ASANA_PROJECT_ID` | Asana project ID for Social & Email Board |
