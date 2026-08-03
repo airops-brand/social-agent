@@ -29,6 +29,8 @@ const { App } = require('@slack/bolt');
 const { Client: NotionClient } = require('@notionhq/client');
 const Anthropic = require('@anthropic-ai/sdk');
 const { OrdinalMcpIntegration } = require('./ordinal-mcp');
+const { findHeadingBlockId, notionBlockUrl } = require('./notion-links');
+const { postSignedOrdinalUpload } = require('./ordinal-upload');
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
@@ -1006,7 +1008,7 @@ async function appendToNotionPage(title, linkedinPost, blogDraft, originalMessag
   const today = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
   // Create a toggle heading with the date and title, containing the drafts inside
-  await notion.blocks.children.append({
+  const appended = await notion.blocks.children.append({
     block_id: pageId,
     children: [
       {
@@ -1062,8 +1064,24 @@ async function appendToNotionPage(title, linkedinPost, blogDraft, originalMessag
     ],
   });
 
-  const notionUrl = `https://www.notion.so/${pageId.replace(/-/g, '')}`;
-  return notionUrl;
+  const toggleBlockId = appended.results?.[0]?.id;
+  if (!toggleBlockId) return notionBlockUrl(pageId);
+
+  // Link to the actual draft inside the toggle so Notion scrolls to it and
+  // expands the parent toggle. Fall back to the new draft heading if Notion's
+  // child lookup is temporarily unavailable.
+  let targetBlockId = toggleBlockId;
+  try {
+    const children = await notion.blocks.children.list({
+      block_id: toggleBlockId,
+      page_size: 100,
+    });
+    targetBlockId = findHeadingBlockId(children.results, 'LinkedIn post draft') || toggleBlockId;
+  } catch (err) {
+    console.warn('[nuggets-agent] Could not resolve Notion draft deep link:', err.message);
+  }
+
+  return notionBlockUrl(pageId, targetBlockId);
 }
 
 // ─── Core: Ordinal MCP helper ─────────────────────────────────────────────
@@ -1104,44 +1122,23 @@ async function uploadToOrdinal(fileId) {
   }
   const imageBuffer = Buffer.from(await downloadRes.arrayBuffer());
 
-  // Step 3: Upload to Notion as a temporary host (Notion gives us a public S3 URL)
-  const tempPage = await notion.pages.create({
-    parent: { page_id: DEFAULT_NOTION_PAGE_ID },
-    properties: { title: [{ text: { content: `_temp_upload_${Date.now()}` } }] },
+  // Step 3: Ask Ordinal for signed credentials, then upload the Slack bytes
+  // directly. Public temp hosts can return HTML challenge pages to Ordinal.
+  const upload = await ordinalMcpCall('ordinal_create_upload', {
+    filename: file.name,
+    mimetype: file.mimetype,
+    size: imageBuffer.length,
   });
-
-  // Upload file as an external block with a data URL won't work, so instead
-  // we'll write the file to a temp path and use a different approach.
-  // Actually, let's just use Notion's file upload via blocks API.
-
-  // Alternative: upload to tmpfiles.org (free, temporary file hosting)
-  const formData = new FormData();
-  formData.append('file', new Blob([imageBuffer], { type: file.mimetype }), file.name);
-
-  const tmpRes = await fetch('https://tmpfiles.org/api/v1/upload', {
-    method: 'POST',
-    body: formData,
-  });
-
-  // Clean up temp Notion page
-  try { await notion.blocks.delete({ block_id: tempPage.id }); } catch {}
-
-  if (!tmpRes.ok) {
-    throw new Error(`Failed to upload to temp host: ${tmpRes.status}`);
-  }
-
-  const tmpData = await tmpRes.json();
-  // tmpfiles.org returns {"status":"success","data":{"url":"https://tmpfiles.org/12345/image.png"}}
-  // Convert to direct download URL
-  const tmpUrl = tmpData.data?.url?.replace('tmpfiles.org/', 'tmpfiles.org/dl/') || tmpData.data?.url;
-  console.log(`[nuggets-agent] Temp hosted URL: ${tmpUrl}`);
-
-  // Step 4: Upload to Ordinal using the public temp URL
-  const upload = await ordinalMcpCall('ordinal_create_upload', { url: tmpUrl });
   console.log(`[nuggets-agent] Ordinal upload created: ${JSON.stringify(upload)}`);
   const uploadId = ordinalEntityId(upload, 'upload');
+  await postSignedOrdinalUpload({
+    upload,
+    buffer: imageBuffer,
+    filename: file.name,
+    mimetype: file.mimetype,
+  });
 
-  // Step 5: Poll for completion
+  // Step 4: Poll for completion
   for (let i = 0; i < 15; i++) {
     await new Promise((r) => setTimeout(r, 2000));
     const status = await ordinalMcpCall('ordinal_get_upload', { uploadId });
