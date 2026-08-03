@@ -43,6 +43,7 @@ const ASANA_PROJECT_ID = process.env.ASANA_PROJECT_ID || '1212399031433417'; // 
 const ANTHROPIC_MODEL_OVERRIDE = (process.env.ANTHROPIC_MODEL || '').trim();
 const ANTHROPIC_MODEL_FALLBACK = 'claude-sonnet-5';
 const ANTHROPIC_MODEL_CACHE_MS = 6 * 60 * 60 * 1000;
+const STRUCTURED_OUTPUT_MAX_TOKENS = 6000;
 
 // Channel → Notion page overrides (format: "channel:pageId,channel:pageId")
 const CHANNEL_NOTION_MAP = {};
@@ -147,6 +148,60 @@ async function createAnthropicMessage(params) {
 
     throw err;
   }
+}
+
+function parseAnthropicJson(message) {
+  if (message.stop_reason === 'max_tokens') {
+    throw new Error('Claude response was truncated at the output token limit');
+  }
+
+  const raw = message.content.find((block) => block.type === 'text')?.text || '';
+  const withoutFences = raw.replace(/```json|```/gi, '').trim();
+  const objectStart = withoutFences.indexOf('{');
+  const objectEnd = withoutFences.lastIndexOf('}');
+
+  if (objectStart === -1 || objectEnd < objectStart) {
+    throw new Error('Claude response did not contain a complete JSON object');
+  }
+
+  return JSON.parse(withoutFences.slice(objectStart, objectEnd + 1));
+}
+
+async function createAnthropicJson({ label, validate, ...params }) {
+  const originalMessages = params.messages;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const messages = attempt === 1
+      ? originalMessages
+      : originalMessages.map((message, index) => {
+        if (index !== originalMessages.length - 1 || message.role !== 'user' || typeof message.content !== 'string') {
+          return message;
+        }
+
+        return {
+          ...message,
+          content: `${message.content}\n\nRETRY REQUIREMENT: Return one complete, compact, valid JSON object. Do not use markdown fences or add any text outside the JSON. Keep the LinkedIn post under 300 words and the blog draft under 1,000 words so the object cannot be truncated.`,
+        };
+      });
+
+    const response = await createAnthropicMessage({ ...params, messages });
+
+    try {
+      const parsed = parseAnthropicJson(response);
+      if (validate && !validate(parsed)) {
+        throw new Error('Claude response JSON was missing required fields');
+      }
+      return parsed;
+    } catch (err) {
+      lastError = err;
+      if (attempt === 1) {
+        console.warn(`[nuggets-agent] ${label} JSON was invalid or truncated; retrying once: ${err.message}`);
+      }
+    }
+  }
+
+  throw new Error(`${label} failed after retry: ${lastError?.message || 'invalid JSON'}`);
 }
 
 // ─── Notion content fetching ───────────────────────────────────────────────
@@ -876,8 +931,9 @@ async function generateDrafts(postIdea, systemPrompt, notionContext, customPromp
     }
   }
 
-  const message = await createAnthropicMessage({
-    max_tokens: 2000,
+  const drafts = await createAnthropicJson({
+    label: 'Draft generation',
+    max_tokens: STRUCTURED_OUTPUT_MAX_TOKENS,
     system: systemPrompt,
     messages: [
       {
@@ -885,17 +941,18 @@ async function generateDrafts(postIdea, systemPrompt, notionContext, customPromp
         content: userContent,
       },
     ],
+    validate: (value) => (
+      typeof value?.title === 'string' &&
+      typeof value?.linkedin_post === 'string' &&
+      typeof value?.blog_draft === 'string'
+    ),
   });
-
-  const raw = message.content.find((b) => b.type === 'text')?.text || '{}';
-  // Strip any accidental markdown fences
-  const clean = raw.replace(/```json|```/g, '').trim();
-  const drafts = JSON.parse(clean);
 
   // QA review pass - check for banned patterns and rewrite
   try {
-    const qaMessage = await createAnthropicMessage({
-      max_tokens: 2000,
+    const qa = await createAnthropicJson({
+      label: 'QA review',
+      max_tokens: STRUCTURED_OUTPUT_MAX_TOKENS,
       system: QA_SYSTEM_PROMPT,
       messages: [
         {
@@ -903,11 +960,12 @@ async function generateDrafts(postIdea, systemPrompt, notionContext, customPromp
           content: `Review this LinkedIn post and blog draft for banned patterns. Fix any violations.\n\nLinkedIn post:\n${drafts.linkedin_post}\n\nBlog draft:\n${drafts.blog_draft}\n\nReturn only valid JSON, no markdown fences, no preamble.`,
         },
       ],
+      validate: (value) => (
+        typeof value?.linkedin_post === 'string' &&
+        typeof value?.blog_draft === 'string' &&
+        Array.isArray(value?.fixes)
+      ),
     });
-
-    const qaRaw = qaMessage.content.find((b) => b.type === 'text')?.text || '{}';
-    const qaClean = qaRaw.replace(/```json|```/g, '').trim();
-    const qa = JSON.parse(qaClean);
 
     if (qa.fixes && qa.fixes.length > 0) {
       console.log(`[nuggets-agent] QA fixes applied: ${qa.fixes.join('; ')}`);

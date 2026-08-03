@@ -56,6 +56,7 @@ Edna can:
 - Turn rough ideas or structured briefs into LinkedIn posts and companion blog drafts
 - Use accessible Notion pages, selected public web pages, AirOps docs, and recent news as context
 - Apply a dedicated QA pass and remember recurring QA fixes
+- Retry truncated or malformed Claude JSON once before reporting a draft-generation failure
 - Automatically select the newest Claude Sonnet model available to the configured Anthropic API key, refreshing every six hours
 - Advise on organic and paid best practices for LinkedIn, X, Instagram, Facebook, and TikTok
 - Adapt B2B strategy by audience, buying role, funnel stage, platform, content format, proof, CTA, and business objective
