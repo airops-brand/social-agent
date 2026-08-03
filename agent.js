@@ -6,8 +6,8 @@
  * 2. Triggers when a message contains "post idea" / "post-idea" / "#post-idea" (case-insensitive)
  * 3. Calls Claude API with Alex Halliday voice system prompt
  * 4. Creates a Notion page in the Nuggets database with the drafts
- * 5. DMs Jess (U09K60X677C) with the Notion link for review
- * 6. Watches for "approved" reply in the DM thread
+ * 5. Lets the original submitter review and approve the draft in Slack
+ * 6. Watches for the submitter's "approved" reply or thumbs-up reaction
  * 7. Posts the Notion link as a reply to the original #0-nuggets message
  * 
  * Setup:
@@ -31,14 +31,13 @@ const Anthropic = require('@anthropic-ai/sdk');
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
-const REVIEWER_SLACK_ID = 'U09K60X677C'; // Jess
+const JESS_SLACK_ID = 'U09K60X677C'; // Daily ideas and error notifications only
 const DEFAULT_NOTION_PAGE_ID = '3371f419db8a810ab58addb600085f6c'; // Nuggets (default)
 const WATCH_CHANNELS = (process.env.WATCH_CHANNELS || '0-nuggets')
   .split(',')
   .map((c) => c.trim().replace(/^#/, ''));
 const ORDINAL_API_KEY = process.env.ORDINAL_API_KEY;
 const ORDINAL_LINKEDIN_PROFILE_ID = process.env.ORDINAL_LINKEDIN_PROFILE_ID || 'a68df3c6-0870-45d0-adfc-a9b3d9917557'; // AirOps
-const ORDINAL_APPROVER_USER_ID = process.env.ORDINAL_APPROVER_USER_ID || 'a32a8b1b-7218-4ca6-bd50-f4649694e1bb'; // Jessica Rosenberg
 const ASANA_TOKEN = process.env.ASANA_TOKEN;
 const ASANA_PROJECT_ID = process.env.ASANA_PROJECT_ID || '1212399031433417'; // Social & Email Board
 const ANTHROPIC_MODEL_OVERRIDE = (process.env.ANTHROPIC_MODEL || '').trim();
@@ -1150,22 +1149,6 @@ async function queueOrdinalPost(title, linkedinPost, assetIds, publishDate) {
   }
 
   const post = await ordinalMcpCall('posts-create', args);
-
-  // Assign approval to Jessica
-  try {
-    await ordinalMcpCall('approvals-create', {
-      postId: post.id,
-      approvals: [{
-        userId: ORDINAL_APPROVER_USER_ID,
-        message: 'Auto-assigned from Slack social agent',
-        isBlocking: true,
-      }],
-    });
-    console.log(`[nuggets-agent] Ordinal approval assigned to Jessica for post ${post.id}`);
-  } catch (err) {
-    console.error('[nuggets-agent] Failed to create Ordinal approval (non-blocking):', err.message);
-  }
-
   return post.id;
 }
 
@@ -1240,40 +1223,11 @@ function extractSubmitterUserId(message, fields = {}) {
 }
 
 function canApproveDraft(approval, userId) {
-  return Boolean(
-    userId &&
-    (userId === REVIEWER_SLACK_ID || userId === approval.submitterUserId)
-  );
+  return Boolean(userId && userId === approval.submitterUserId);
 }
 
 function findLatestPendingApproval(predicate) {
   return Array.from(pendingApprovals.entries()).reverse().find((entry) => predicate(entry[1], entry[0])) || null;
-}
-
-// ─── Core: send DM to reviewer ──────────────────────────────────────────────
-
-async function sendReviewDM(notionUrl, originalMessage, originalChannelId, originalMessageTs, channelName, drafts, submitterUserId) {
-  const preview = originalMessage.slice(0, 120) + (originalMessage.length > 120 ? '...' : '');
-  const submitterLine = submitterUserId ? `\n*Submitted by:* <@${submitterUserId}>` : '';
-
-  const result = await slack.client.chat.postMessage({
-    channel: REVIEWER_SLACK_ID,
-    text: `*New post idea ready for review* 👀${submitterLine}\n\n*Original nugget:*\n> ${preview}\n\n*Drafts in Notion:* ${notionUrl}\n\nReply *approved* to this message to post the link back in #${channelName}.`,
-  });
-
-  // Store state so we can act on the "approved" reply
-  pendingApprovals.set(result.ts, {
-    originalChannelId,
-    originalMessageTs,
-    notionUrl,
-    channelName,
-    submitterUserId,
-    drafts,
-    dmChannelId: result.channel,
-  });
-  saveState();
-
-  return result.ts;
 }
 
 // ─── Slack event: Workflow Builder form submission ────────────────────────────
@@ -1306,6 +1260,15 @@ slack.event('message', async ({ event, client }) => {
   const { prompt: formPrompt, allText, publishDate } = buildFormPrompt(fields);
   const imageFiles = getSlackFileIds(message);
   const submitterUserId = extractSubmitterUserId(message, fields);
+
+  if (!submitterUserId) {
+    await client.chat.postMessage({
+      channel: message.channel,
+      thread_ts: message.ts,
+      text: 'I could not identify the submitter, so I cannot create an approvable draft. Add a *Submitted by* Slack user mention to the workflow and submit it again.',
+    });
+    return;
+  }
 
   try {
     // 1. Acknowledge
@@ -1357,28 +1320,23 @@ slack.event('message', async ({ event, client }) => {
       notionPageId: pageId,
     });
 
-    // 6. DM reviewer
-    const dmTs = await sendReviewDM(
+    // 6. Store approval state. Only the form submitter can approve.
+    const approvalKey = followUp.ts;
+    pendingApprovals.set(approvalKey, {
+      originalChannelId: message.channel,
+      originalMessageTs: message.ts,
       notionUrl,
-      originalSummary,
-      message.channel,
-      message.ts,
       channelName,
+      submitterUserId,
       drafts,
-      submitterUserId
-    );
-    console.log(`[nuggets-agent] DM sent to reviewer.`);
-
-    // Store image URLs and publish date on the pending approval
-    const pending = pendingApprovals.get(dmTs);
-    if (pending) {
-      if (imageFiles.length > 0) pending.imageFiles = imageFiles;
-      if (publishDate) pending.publishDate = publishDate;
-    }
+      dmChannelId: message.channel,
+      imageFiles,
+      publishDate,
+    });
 
     // 7. Map for thumbs-up approval
-    reactionApprovalMap.set(`${message.channel}:${followUp.ts}`, dmTs);
-    reactionApprovalMap.set(`${message.channel}:${message.ts}`, dmTs);
+    reactionApprovalMap.set(`${message.channel}:${followUp.ts}`, approvalKey);
+    reactionApprovalMap.set(`${message.channel}:${message.ts}`, approvalKey);
     saveState();
   } catch (err) {
     console.error('[nuggets-agent] Error processing form submission:', err);
@@ -1454,22 +1412,22 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
       notionPageId: pageId,
     });
 
-    // 6. DM reviewer
-    const dmTs = await sendReviewDM(
+    // 6. Store approval state. Only the message author can approve.
+    const approvalKey = followUp.ts;
+    pendingApprovals.set(approvalKey, {
+      originalChannelId: message.channel,
+      originalMessageTs: message.ts,
       notionUrl,
-      postIdea,
-      message.channel,
-      message.ts,
       channelName,
+      submitterUserId: message.user,
       drafts,
-      message.user
-    );
-    console.log(`[nuggets-agent] DM sent to reviewer.`);
+      dmChannelId: message.channel,
+    });
 
     // 7. Map the follow-up message for thumbs-up reaction matching
-    reactionApprovalMap.set(`${message.channel}:${followUp.ts}`, dmTs);
+    reactionApprovalMap.set(`${message.channel}:${followUp.ts}`, approvalKey);
     // Also map the original message in case they react to that
-    reactionApprovalMap.set(`${message.channel}:${message.ts}`, dmTs);
+    reactionApprovalMap.set(`${message.channel}:${message.ts}`, approvalKey);
     saveState();
   } catch (err) {
     console.error('[nuggets-agent] Error processing post idea:', err);
@@ -1515,7 +1473,7 @@ slack.message(async ({ message, client }) => {
       await client.chat.postMessage({
         channel: message.channel,
         thread_ts: message.thread_ts,
-        text: 'Only the person who submitted this draft or Jess can approve it.',
+        text: 'Only the person who submitted this draft can approve it.',
       });
       return;
     }
@@ -1621,9 +1579,38 @@ You never say: "Hey team!", "Super excited to share", "Friendly reminder", "No w
 
 You sound like: "Three ideas. All specific. Pick one and I'll draft it." / "That topic has legs. Here's the angle that would actually land." / "Vague brief. Give me the data point and I'll give you a post."`;
 
+const SOCIAL_MEDIA_STRATEGY_GUIDE = `
+SOCIAL MEDIA AND B2B EXPERTISE:
+You know organic and paid social strategy for LinkedIn, X, Instagram, Facebook, and TikTok. Give platform-native advice rather than recycling one post everywhere. Separate durable principles from fast-changing platform features. Never invent current character limits, media specifications, algorithm claims, or trend data. Say when a live platform check is needed.
+
+Universal principles:
+- Start with the business goal, target audience, and intended action. Optimize for the metric that matches the goal, not vanity engagement.
+- Earn attention immediately. Deliver one clear idea, concrete value, credible proof, and one proportionate call to action.
+- Match the platform's native creative language. Adapt the hook, structure, media, pacing, and CTA instead of copying and pasting.
+- Use accessible creative: captions for video, legible on-screen text, useful alt text, and key information that does not depend on sound alone.
+- Treat replies and community management as part of distribution. Test hooks, formats, and creative variants, then learn from retention, saves, shares, qualified engagement, traffic, and conversion.
+
+B2B principles:
+- Write for a specific role, problem, maturity level, and stage of the buying journey. Remember that B2B decisions involve multiple stakeholders.
+- Build category understanding and trust before asking for a demo. Balance distinctive brand, executive point of view, practical education, customer proof, product evidence, and conversion content.
+- Prefer named examples, original data, customer outcomes, practitioner lessons, and useful frameworks over unsupported claims or generic thought leadership.
+- Use people as distribution: executives, subject-matter experts, employees, customers, partners, and credible creators. Preserve each person's actual voice.
+- Connect social activity to business outcomes with appropriate measures: target-account engagement, qualified audience growth, branded demand, site behavior, assisted pipeline, and revenue influence. Do not pretend last-click attribution tells the whole story.
+
+Platform playbooks:
+- LinkedIn: professional relevance, expert POV, specific evidence, strong opening lines, readable spacing, useful documents or native video, and substantive conversation. Optimize B2B content for trust, saves, shares, and qualified discussion. Avoid engagement bait and empty corporate announcements.
+- X: concise, conversational, timely, and responsive. Lead with the point, use media when it adds information, use threads only when the idea needs them, avoid hashtag stuffing, and participate in live category conversations with speed and context.
+- Instagram: visual-first storytelling. Use carousels for saveable education and Reels for discovery. Design mobile-first vertical video with a visual hook, captions, safe text placement, human presence, and a reason to save, share, or reply.
+- Facebook: community, context, and utility. Favor native posts, video/Reels, groups, events, customer stories, and prompts that invite genuine discussion. Make the value and audience clear, then manage comments and messages like customer experience.
+- TikTok: create TikTok-first, vertical, human video. Hook in the opening seconds, use sound and captions, show rather than announce, structure around problem, demonstration, proof, and action, and use trends only when the brand has a credible connection. Test multiple native variations and treat creators as creative partners.
+
+When someone asks for a cross-platform campaign, start with one core insight and produce a distinct execution for each requested platform. Explain why each adaptation fits its channel. The automated Notion and Ordinal workflow currently generates and queues LinkedIn posts only; you can still advise on, brainstorm, or draft other platform content directly in Slack chat.`;
+
 const BRAINSTORM_SYSTEM_PROMPT = `${EDNA_PERSONA}
 
-You help the AirOps team come up with LinkedIn post ideas for the brand and its executives.
+${SOCIAL_MEDIA_STRATEGY_GUIDE}
+
+You help the AirOps team develop platform-native social ideas for the brand and its executives. Default to LinkedIn when no platform is named. Ask which platform matters when that choice would materially change the idea.
 
 AirOps is a content operations and precision marketing platform focused on AI search performance, Answer Engine Optimization (AEO), and Content Engineering.
 
@@ -1633,13 +1620,17 @@ Suggest concrete post ideas with hooks, not vague themes. When someone likes an 
 
 const EDNA_CHAT_SYSTEM_PROMPT = `${EDNA_PERSONA}
 
+${SOCIAL_MEDIA_STRATEGY_GUIDE}
+
 You are the AirOps social agent built by Jess Rosenberg in April 2026 using Claude Code. You run on Railway, connected to Slack, Notion, Ordinal, Claude API, AirOps docs, and Google News RSS.
 
 You can answer questions about:
 - How you were built (Node.js, Claude Code session, one day build)
-- Social media trends, AI search, AEO, content marketing, brand strategy
+- Social media strategy and best practices for LinkedIn, X, Instagram, Facebook, and TikTok
+- B2B social media marketing, including brand building, executive content, social proof, demand creation, conversion, and measurement
+- AI search, AEO, content marketing, and brand strategy
 - AirOps product and capabilities (you search the docs)
-- Content strategy and LinkedIn best practices
+- Platform-native content strategy and cross-platform campaign adaptation
 - The AirOps brand kit and voice guidelines
 
 Stay in character. Be helpful but keep the Edna voice: direct, sharp, no fluff. If someone asks something you genuinely don't know, say so plainly.`;
@@ -1652,7 +1643,7 @@ slack.message(async ({ message, client }) => {
   if (!text) return;
   const lower = text.toLowerCase();
 
-  // The reviewer can approve any draft. Submitters can approve their own.
+  // Only the person who submitted a draft can approve it.
   if (lower === 'approved' || lower === 'approve') {
     let pendingEntry = null;
 
@@ -1680,7 +1671,7 @@ slack.message(async ({ message, client }) => {
     await client.chat.postMessage({
       channel: message.channel,
       text: pendingEntry
-        ? 'Only the person who submitted this draft or Jess can approve it.'
+        ? 'Only the person who submitted this draft can approve it.'
         : 'I could not find a pending draft for you to approve.',
     });
     return;
@@ -1718,7 +1709,7 @@ slack.message(async ({ message, client }) => {
   if (!session && (lower === 'help' || lower === 'menu')) {
     await client.chat.postMessage({
       channel: message.channel,
-      text: `Edna. AirOps social agent. Here is what I do.\n\n*"draft"* - I write a LinkedIn post + blog draft in the voice you choose\n*"brainstorm"* - We ideate on content together\n*"reset"* - Start over\n\nOr just talk to me. I have opinions on most things.`,
+      text: `Edna. AirOps social agent. Here is what I do.\n\n*"draft"* - I write a LinkedIn post + blog draft in the voice you choose\n*"brainstorm"* - We develop platform-native ideas together\n*"reset"* - Start over\n\nOr ask me about B2B strategy for LinkedIn, X, Instagram, Facebook, or TikTok. I have opinions on most things.`,
     });
     dmSessions.set(userId, { step: 'choose_mode', history: [] });
     return;
@@ -1872,25 +1863,20 @@ slack.message(async ({ message, client }) => {
         text: `Drafts are ready: ${notionUrl}\n\nReply *approved* or add a 👍 to this message to approve this draft. Send another idea to keep drafting in the same voice, or type "reset" to start over.`,
       });
 
-      // DM reviewer
-      const preview = postIdea.slice(0, 120) + (postIdea.length > 120 ? '...' : '');
-      const result = await slack.client.chat.postMessage({
-        channel: REVIEWER_SLACK_ID,
-        text: `*New post idea ready for review* 👀\n\n*Voice:* ${voiceLabel}\n*Submitted via DM by <@${userId}>*\n\n*Original nugget:*\n> ${preview}\n\n*Drafts in Notion:* ${notionUrl}\n\nReply *approved* to this message to queue in Ordinal.`,
-      });
-
-      pendingApprovals.set(result.ts, {
+      // Store approval against the submitter-facing message. No reviewer copy.
+      const approvalKey = submitterDraftMessage.ts;
+      pendingApprovals.set(approvalKey, {
         originalChannelId: message.channel,
         originalMessageTs: message.ts,
         notionUrl,
         channelName: null,
         submitterUserId: userId,
         drafts,
-        dmChannelId: result.channel,
+        dmChannelId: message.channel,
       });
 
-      reactionApprovalMap.set(`${message.channel}:${submitterDraftMessage.ts}`, result.ts);
-      reactionApprovalMap.set(`${message.channel}:${message.ts}`, result.ts);
+      reactionApprovalMap.set(`${message.channel}:${submitterDraftMessage.ts}`, approvalKey);
+      reactionApprovalMap.set(`${message.channel}:${message.ts}`, approvalKey);
       saveState();
 
       // Stay in awaiting_idea so they can draft another with same voice
@@ -2240,7 +2226,7 @@ async function sendDailyIdeas() {
     }
 
     await slack.client.chat.postMessage({
-      channel: REVIEWER_SLACK_ID,
+      channel: JESS_SLACK_ID,
       text: `*Good morning. Your daily post ideas.*\n\n${ideas}\n\n_Reply with a number to draft it, or DM me to brainstorm._${newsDigest}`,
     });
 
@@ -2281,7 +2267,7 @@ process.on('uncaughtException', (err) => {
   // Try to notify Jess
   try {
     slack.client.chat.postMessage({
-      channel: REVIEWER_SLACK_ID,
+      channel: JESS_SLACK_ID,
       text: `Edna here. Something broke and I had to catch myself.\n\nError: ${err.message}\n\nI'm still running, but worth checking the Railway logs.`,
     }).catch(() => {});
   } catch {}
@@ -2291,7 +2277,7 @@ process.on('unhandledRejection', (err) => {
   console.error('[nuggets-agent] Unhandled rejection:', err.message || err);
   try {
     slack.client.chat.postMessage({
-      channel: REVIEWER_SLACK_ID,
+      channel: JESS_SLACK_ID,
       text: `Edna here. Caught an unhandled error.\n\nError: ${err.message || err}\n\nStill running. Check Railway if this keeps happening.`,
     }).catch(() => {});
   } catch {}

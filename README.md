@@ -26,13 +26,12 @@ Edna watches the channels listed in `WATCH_CHANNELS`. The documented setup uses 
    - Accepts revision feedback in that thread
    - Can use accessible Notion links and public web URLs included in revision feedback as context
 5. **Routes and approves the draft**
-   - DMs Jess with the draft and review link
-   - Lets the original submitter approve their own draft with 👍 or an `approved` reply
-   - Lets Jess approve any pending draft
+   - Records the original submitter as the sole approver
+   - Lets that submitter approve their draft with 👍 or an `approved` reply
+   - Does not send a separate reviewer DM or grant anyone else approval access
 6. **Hands off approved content**
    - Re-reads Notion so manual edits are included
    - Uploads attached images and queues the LinkedIn post in Ordinal
-   - Assigns a blocking Ordinal approval to Jess
    - Creates a task on the Social & Email Board in Asana
 
 For Workflow Builder requests, the generated Slack message must include the submitter as a Slack user mention so Edna can identify who owns—and may approve—the draft.
@@ -42,9 +41,9 @@ For Workflow Builder requests, the generated Slack message must include the subm
 Anyone in the workspace can DM Edna.
 
 - **Draft a post** — Type `draft`, choose AirOps Brand, Alex Halliday, Christy Roach, or Matt Hammel, then send the idea and any relevant Notion link.
-- **Approve your draft** — Reply `approved` or add 👍 to Edna's draft-ready message. A submitter can approve only their own drafts; Jess can approve any draft.
+- **Approve your draft** — Reply `approved` or add 👍 to Edna's draft-ready message. Only the person who submitted the draft can approve it.
 - **Brainstorm** — Type `brainstorm` to develop concrete hooks and angles, then type `draft` when an idea is ready.
-- **Chat** — Ask about Edna, content strategy, LinkedIn best practices, the AirOps brand kit, or supported AirOps product topics.
+- **Chat** — Ask about Edna, platform-specific or B2B social strategy, the AirOps brand kit, or supported AirOps product topics.
 - **Start over** — Use `reset`, `start over`, or `menu` to clear the current DM session. Use `help` to see the available modes.
 
 DM drafts are saved to the DM Notion destination and use the same Ordinal handoff as channel drafts. Edna re-reads Notion during approval, so manual edits are included.
@@ -58,16 +57,23 @@ Edna can:
 - Use accessible Notion pages, selected public web pages, AirOps docs, and recent news as context
 - Apply a dedicated QA pass and remember recurring QA fixes
 - Automatically select the newest Claude Sonnet model available to the configured Anthropic API key, refreshing every six hours
+- Advise on organic and paid best practices for LinkedIn, X, Instagram, Facebook, and TikTok
+- Adapt B2B strategy by audience, buying role, funnel stage, platform, content format, proof, CTA, and business objective
+- Brainstorm cross-platform campaigns and draft platform-native copy or scripts directly in Slack chat
 - Learn patterns from approved posts through persistent long-term memory
 - Send Jess five daily post ideas at 9:00 a.m. CT, informed by recent Google News headlines and AirOps product context
 - Preserve pending approvals across Railway restarts
 - Notify Jess in Slack when the service catches an unexpected error
 
+Edna's cross-platform guidance is grounded in durable B2B principles and the platforms' own published guidance, including [LinkedIn's B2B marketing resources](https://business.linkedin.com/advertise/resources/marketing-terms/b2b-marketing), [X organic best practices](https://business.x.com/en/basics/organic-best-practices), [Meta's Instagram and Facebook Reels guidance](https://www.facebook.com/business/ads/facebook-instagram-reels-ads), and [TikTok Creative Codes](https://ads.tiktok.com/business/en/creative-codes). Exact specifications and fast-moving platform behavior still require a current check.
+
 ### What Edna cannot do
 
 - **She does not monitor every Slack channel.** Channel behavior is limited to `WATCH_CHANNELS`, and regular channel messages must include “post idea” to trigger drafting.
-- **She does not publish independently.** Edna queues copy in Ordinal and creates a blocking approval; final publishing controls remain in Ordinal.
-- **She cannot approve someone else's draft on their behalf.** A draft can be approved by its submitter or by Jess.
+- **She does not approve content herself.** Edna acts only after the original submitter approves the draft in Slack, then queues the post in Ordinal.
+- **She cannot approve someone else's draft on their behalf.** The original submitter is the sole approver; Jess has no reviewer override.
+- **Her automated publishing workflow is LinkedIn-only.** Edna can advise on, brainstorm, and draft content for X, Instagram, Facebook, and TikTok in Slack chat, but the Notion-to-Ordinal handoff currently queues LinkedIn posts only.
+- **She cannot guarantee that platform rules or trends are current.** Exact limits, specifications, algorithm behavior, and live trends should be checked against current platform guidance.
 - **She does not guarantee factual accuracy.** Generated claims, dates, links, and product details still require human review.
 - **She cannot access every link.** Notion pages must be shared with the integration, and external pages must be publicly retrievable.
 - **She is not a general-purpose workflow bot.** Her connected actions are limited to this social-content workflow across Slack, Notion, Ordinal, and Asana.
@@ -142,7 +148,6 @@ Enable Socket Mode and generate an App-Level Token with `connections:write` scop
 | `CHANNEL_PROMPT_MAP` | Channel-to-voice mapping (`social-workflow:airops`) |
 | `ORDINAL_API_KEY` | Ordinal API bearer token |
 | `ORDINAL_LINKEDIN_PROFILE_ID` | AirOps LinkedIn profile UUID in Ordinal |
-| `ORDINAL_APPROVER_USER_ID` | Jess's Ordinal user UUID for auto-approval |
 | `ASANA_TOKEN` | Asana personal access token |
 | `ASANA_PROJECT_ID` | Asana project ID for Social & Email Board |
 | `STATE_DIR` | Persistent state directory (`/data` on Railway) |
@@ -203,7 +208,7 @@ Node.js Agent (Railway)
   |-- AirOps Docs MCP --> Product context for accuracy
   |-- Google News RSS --> Daily headline scanning (48hr window)
   |-- Notion API --> Save drafts, fetch page context, re-read on approval
-  |-- Ordinal MCP --> Queue posts, upload images, create approvals
+  |-- Ordinal MCP --> Queue approved LinkedIn posts and upload images
   |-- Asana API --> Create tasks on Social & Email Board
   |-- tmpfiles.org --> Image proxy (Slack to Ordinal)
   |-- /data/approvals.json --> Persistent approval state
