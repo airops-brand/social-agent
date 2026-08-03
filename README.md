@@ -44,6 +44,7 @@ Anyone in the workspace can DM Edna.
 - **Draft a post** — Type `draft`, choose AirOps Brand, Alex Halliday, Christy Roach, or Matt Hammel, then send the idea and any relevant Notion link.
 - **Approve your draft** — Reply `approved` or add 👍 to Edna's draft-ready message. Only the person who submitted the draft can approve it.
 - **Brainstorm** — Type `brainstorm` to develop concrete hooks and angles, then type `draft` when an idea is ready.
+- **Pull analytics** — Type `analytics`, then ask for post performance, engagement, impressions, top posts, or follower growth for any supported social profile connected to the configured Ordinal workspace. Name an account, ask for all accounts, and optionally provide a date range.
 - **Chat** — Ask about Edna, platform-specific or B2B social strategy, the AirOps brand kit, or supported AirOps product topics.
 - **Start over** — Use `reset`, `start over`, or `menu` to clear the current DM session. Use `help` to see the available modes.
 
@@ -63,6 +64,7 @@ Edna can:
 - Adapt B2B strategy by audience, buying role, funnel stage, platform, content format, proof, CTA, and business objective
 - Brainstorm cross-platform campaigns and draft platform-native copy or scripts directly in Slack chat
 - Learn patterns from approved posts through persistent long-term memory
+- Pull read-only post performance and follower-growth reports from Ordinal for connected LinkedIn, X, Instagram, and Facebook profiles in DMs
 - Send Jess five daily post ideas at 9:00 a.m. CT, informed by recent Google News headlines and AirOps product context
 - Preserve pending approvals across Railway restarts
 - Notify Jess in Slack when the service catches an unexpected error
@@ -208,7 +210,7 @@ The volume stores `approvals.json` (pending approval state) and `MEMORY.md` (lon
 Slack (Socket Mode)
   |-- Channel messages ("post idea" trigger)
   |-- Workflow Builder form submissions
-  |-- DM conversations (menu, voice picker, brainstorm, chat)
+  |-- DM conversations (menu, voice picker, brainstorm, analytics, chat)
   |-- Thread replies (intent-routed revisions, questions, and content tasks)
   |-- Thumbs-up reactions (approval)
   |
@@ -217,7 +219,7 @@ Node.js Agent (Railway)
   |-- AirOps Docs MCP --> Product context for accuracy
   |-- Google News RSS --> Daily headline scanning (48hr window)
   |-- Notion API --> Save drafts, fetch page context, re-read on approval
-  |-- Ordinal MCP --> Queue approved LinkedIn posts and upload images
+  |-- Ordinal MCP --> Queue approved LinkedIn posts, upload images, and read account analytics
   |-- Asana API --> Create tasks on Social & Email Board
   |-- tmpfiles.org --> Image proxy (Slack to Ordinal)
   |-- /data/approvals.json --> Persistent approval state

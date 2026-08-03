@@ -6,6 +6,7 @@ const test = require('node:test');
 
 const {
   EncryptedJsonStore,
+  OrdinalMcpIntegration,
   RailwayOAuthProvider,
   parseToolResult,
 } = require('./ordinal-mcp');
@@ -45,4 +46,15 @@ test('tool results prefer structured content and surface tool errors', () => {
     () => parseToolResult({ isError: true, content: [{ type: 'text', text: 'denied' }] }),
     /denied/,
   );
+});
+
+test('discovers the live Ordinal tool schemas from the connected client', async () => {
+  const integration = Object.create(OrdinalMcpIntegration.prototype);
+  integration.isAuthorized = () => true;
+  integration.getClient = async () => ({
+    listTools: async () => ({ tools: [{ name: 'ordinal_get_analytics' }] }),
+  });
+  integration.resetClient = () => {};
+
+  assert.deepEqual(await integration.listTools(), [{ name: 'ordinal_get_analytics' }]);
 });

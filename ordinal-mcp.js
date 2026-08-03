@@ -284,6 +284,21 @@ class OrdinalMcpIntegration {
     }
   }
 
+  async listTools() {
+    if (!this.isAuthorized()) {
+      throw new Error('Ordinal OAuth authorization is required');
+    }
+
+    try {
+      const client = await this.getClient();
+      const result = await client.listTools();
+      return result.tools || [];
+    } catch (error) {
+      this.resetClient();
+      throw new Error(`Ordinal tool discovery failed: ${error.message}`);
+    }
+  }
+
   async beginOAuth() {
     if (!this.isConfigured()) throw new Error('Ordinal OAuth is not configured in Railway');
     this.provider.beginAuthorization();

@@ -41,6 +41,13 @@ const {
 } = require('./slack-thread-routing');
 const { extractWebUrls, fetchWebPageContext } = require('./web-context');
 const {
+  ORDINAL_ANALYTICS_TOOL_NAMES,
+  clampSlackMessage,
+  compactOrdinalToolResult,
+  isOrdinalAnalyticsRequest,
+  toAnthropicAnalyticsTools,
+} = require('./ordinal-analytics');
+const {
   AIROPS_BRAND_KIT_ID,
   VOICE_OPTIONS,
   getFormVoiceKey,
@@ -1140,6 +1147,98 @@ async function ordinalMcpCall(toolName, args) {
   return ordinal.callTool(toolName, { workspaceSlug: ORDINAL_WORKSPACE_SLUG, ...args });
 }
 
+async function runOrdinalAnalyticsRequest(request) {
+  if (!ORDINAL_WORKSPACE_SLUG) {
+    throw new Error('ORDINAL_WORKSPACE_SLUG is not configured');
+  }
+  if (!ordinal.isConfigured() || !ordinal.isAuthorized()) {
+    throw new Error('Ordinal OAuth is not connected');
+  }
+
+  const mcpTools = await ordinal.listTools();
+  const tools = toAnthropicAnalyticsTools(mcpTools);
+  const availableNames = new Set(tools.map((tool) => tool.name));
+  if (!availableNames.has('ordinal_get_workspace_context') || !availableNames.has('ordinal_get_analytics')) {
+    throw new Error('Ordinal analytics tools are unavailable');
+  }
+
+  const system = `${EDNA_PERSONA}
+
+You are producing a factual social analytics report from Ordinal for an AirOps team member in Slack.
+
+Rules:
+- Use ordinal_get_workspace_context first to resolve the connected social profile or profiles requested by name or platform.
+- Use ordinal_get_analytics for the requested post performance, follower growth, comparison, or top-post report.
+- The configured workspace slug is "${ORDINAL_WORKSPACE_SLUG}". Include it whenever the tool schema accepts a workspace slug.
+- If no account is named, include every connected account that supports the requested analytics.
+- If no time period is named, use the last 30 days ending today (${new Date().toISOString().slice(0, 10)}).
+- Never invent a profile, metric, date range, comparison, or result. Say plainly when Ordinal does not return requested data.
+- Distinguish totals from rates and follower counts from follower growth.
+- Return a concise Slack-ready report. Start with the account(s) and date range, then the important numbers, top content or changes, and 1-3 grounded takeaways.
+- Use short paragraphs and bullets. Do not use a Markdown table. Do not mention tool names or expose raw JSON.
+- These are read-only requests. You cannot create, update, archive, approve, or delete anything in Ordinal.`;
+
+  const messages = [{ role: 'user', content: request }];
+
+  for (let round = 0; round < 8; round += 1) {
+    const response = await createAnthropicMessage({
+      max_tokens: 1800,
+      system,
+      tools,
+      messages,
+    });
+    messages.push({ role: 'assistant', content: response.content });
+
+    const toolCalls = response.content.filter((block) => block.type === 'tool_use');
+    if (toolCalls.length === 0) {
+      const report = response.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n')
+        .trim();
+      if (!report) throw new Error('Claude returned an empty Ordinal analytics report');
+      return clampSlackMessage(report);
+    }
+
+    const toolResults = [];
+    for (const call of toolCalls) {
+      if (!ORDINAL_ANALYTICS_TOOL_NAMES.has(call.name)) {
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: call.id,
+          is_error: true,
+          content: 'That tool is not available for analytics requests.',
+        });
+        continue;
+      }
+
+      const args = { ...(call.input || {}) };
+      if (!args.workspaceSlug) args.workspaceSlug = ORDINAL_WORKSPACE_SLUG;
+
+      try {
+        const result = await ordinal.callTool(call.name, args);
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: call.id,
+          content: compactOrdinalToolResult(result),
+        });
+      } catch (error) {
+        console.error(`[nuggets-agent] Ordinal analytics ${call.name} failed:`, error.message);
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: call.id,
+          is_error: true,
+          content: `Ordinal could not complete that read: ${error.message}`,
+        });
+      }
+    }
+
+    messages.push({ role: 'user', content: toolResults });
+  }
+
+  throw new Error('Ordinal analytics required too many tool calls');
+}
+
 function ordinalEntityId(result, entityName) {
   const id = result?.id
     || result?.data?.id
@@ -1898,8 +1997,30 @@ You can answer questions about:
 - AirOps product and capabilities (you search the docs)
 - Platform-native content strategy and cross-platform campaign adaptation
 - The AirOps brand kit and voice guidelines
+- Live social account analytics from Ordinal when the user asks for performance data
 
 Stay in character. Be helpful but keep the Edna voice: direct, sharp, no fluff. If someone asks something you genuinely don't know, say so plainly.`;
+
+async function handleOrdinalAnalyticsDm(message, client, request) {
+  await client.chat.postMessage({
+    channel: message.channel,
+    text: 'Pulling the latest data from Ordinal. This can take a moment.',
+  });
+
+  try {
+    const report = await runOrdinalAnalyticsRequest(request);
+    await client.chat.postMessage({
+      channel: message.channel,
+      text: `${report}\n\n_Ask for another account, platform, metric, or date range—or type "reset" to leave analytics mode._`,
+    });
+  } catch (error) {
+    console.error('[nuggets-agent] Ordinal analytics DM error:', error.message);
+    await client.chat.postMessage({
+      channel: message.channel,
+      text: 'I could not pull Ordinal analytics right now. The Ordinal connection or analytics access needs attention. Try again shortly, or type "reset" to leave analytics mode.',
+    });
+  }
+}
 
 slack.message(async ({ message, client }) => {
   if (message.bot_id || message.subtype) return;
@@ -1952,6 +2073,19 @@ slack.message(async ({ message, client }) => {
     session = null;
   }
 
+  // Let users switch out of analytics mode without resetting first.
+  if (session?.step === 'analytics' && (
+    lower === 'draft'
+    || lower.includes('draft a post')
+    || lower.includes('write a post')
+    || lower === 'brainstorm'
+    || lower.includes('brainstorm')
+    || lower.includes('ideate')
+  )) {
+    dmSessions.delete(userId);
+    session = null;
+  }
+
   // Draft/brainstorm shortcuts without going through menu
   if (!session && (lower === 'draft' || lower.includes('draft a post') || lower.includes('write a post'))) {
     dmSessions.set(userId, { step: 'choose_voice', mode: 'draft', history: [] });
@@ -1971,11 +2105,39 @@ slack.message(async ({ message, client }) => {
     return;
   }
 
+  const analyticsCommand = lower === 'analytics'
+    || lower === 'performance report'
+    || lower === 'social report'
+    || lower === 'account report';
+
+  if (analyticsCommand) {
+    dmSessions.set(userId, { step: 'analytics', mode: 'analytics', history: [] });
+    await client.chat.postMessage({
+      channel: message.channel,
+      text: 'Which account and time period? Try: “Alex engagement last 30 days,” “top AirOps posts this quarter,” or “follower growth for all connected accounts.”',
+    });
+    return;
+  }
+
+  if (session?.step === 'analytics' && lower === 'help') {
+    await client.chat.postMessage({
+      channel: message.channel,
+      text: 'Ask for post performance, engagement, impressions, top posts, or follower growth. Name one connected account or ask for all accounts, and include a date range if you care about one.',
+    });
+    return;
+  }
+
+  if (isOrdinalAnalyticsRequest(text) || session?.step === 'analytics') {
+    dmSessions.set(userId, { step: 'analytics', mode: 'analytics', history: [] });
+    await handleOrdinalAnalyticsDm(message, client, text);
+    return;
+  }
+
   // Help / menu
   if (!session && (lower === 'help' || lower === 'menu')) {
     await client.chat.postMessage({
       channel: message.channel,
-      text: `Edna. AirOps social agent. Here is what I do.\n\n*"draft"* - I write a LinkedIn post + blog draft in the voice you choose\n*"brainstorm"* - We develop platform-native ideas together\n*"reset"* - Start over\n\nOr ask me about B2B strategy for LinkedIn, X, Instagram, Facebook, or TikTok. I have opinions on most things.`,
+      text: `Edna. AirOps social agent. Here is what I do.\n\n*"draft"* - I write a LinkedIn post + blog draft in the voice you choose\n*"brainstorm"* - We develop platform-native ideas together\n*"analytics"* - I pull live performance data from connected accounts in Ordinal\n*"reset"* - Start over\n\nOr ask me about B2B strategy for LinkedIn, X, Instagram, Facebook, or TikTok. I have opinions on most things.`,
     });
     dmSessions.set(userId, { step: 'choose_mode', history: [] });
     return;
@@ -1987,8 +2149,14 @@ slack.message(async ({ message, client }) => {
     dmSessions.set(userId, session);
   }
 
-  // If in choose_mode and they say something that isn't 1/2/draft/brainstorm, treat as chat
-  if (session.step === 'choose_mode' && lower !== '1' && lower !== '2' && !lower.includes('draft') && !lower.includes('brainstorm')) {
+  // If in choose_mode and they say something that isn't a mode, treat as chat.
+  if (session.step === 'choose_mode'
+    && lower !== '1'
+    && lower !== '2'
+    && lower !== '3'
+    && !lower.includes('draft')
+    && !lower.includes('brainstorm')
+    && !lower.includes('analytics')) {
     session.step = 'chatting';
     dmSessions.set(userId, session);
   }
@@ -2059,10 +2227,22 @@ slack.message(async ({ message, client }) => {
       return;
     }
 
+    if (lower === '3' || lower.includes('analytics') || lower.includes('performance')) {
+      session.step = 'analytics';
+      session.mode = 'analytics';
+      session.history = [];
+      dmSessions.set(userId, session);
+      await client.chat.postMessage({
+        channel: message.channel,
+        text: 'Which account and time period? Try: “Alex engagement last 30 days,” “top AirOps posts this quarter,” or “follower growth for all connected accounts.”',
+      });
+      return;
+    }
+
     // Didn't understand
     await client.chat.postMessage({
       channel: message.channel,
-      text: `Reply *1* for drafting or *2* for brainstorming.`,
+      text: `Reply *1* for drafting, *2* for brainstorming, or *3* for analytics.`,
     });
     return;
   }
