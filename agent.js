@@ -41,6 +41,9 @@ const ORDINAL_LINKEDIN_PROFILE_ID = process.env.ORDINAL_LINKEDIN_PROFILE_ID || '
 const ORDINAL_APPROVER_USER_ID = process.env.ORDINAL_APPROVER_USER_ID || 'a32a8b1b-7218-4ca6-bd50-f4649694e1bb'; // Jessica Rosenberg
 const ASANA_TOKEN = process.env.ASANA_TOKEN;
 const ASANA_PROJECT_ID = process.env.ASANA_PROJECT_ID || '1212399031433417'; // Social & Email Board
+const ANTHROPIC_MODEL_OVERRIDE = (process.env.ANTHROPIC_MODEL || '').trim();
+const ANTHROPIC_MODEL_FALLBACK = 'claude-sonnet-5';
+const ANTHROPIC_MODEL_CACHE_MS = 6 * 60 * 60 * 1000;
 
 // Channel → Notion page overrides (format: "channel:pageId,channel:pageId")
 const CHANNEL_NOTION_MAP = {};
@@ -76,6 +79,76 @@ const slack = new App({
 
 const notion = new NotionClient({ auth: process.env.NOTION_TOKEN });
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+let anthropicModelCache = { id: null, expiresAt: 0 };
+
+async function discoverAnthropicModel(forceRefresh = false) {
+  if (ANTHROPIC_MODEL_OVERRIDE) return ANTHROPIC_MODEL_OVERRIDE;
+
+  const now = Date.now();
+  if (!forceRefresh && anthropicModelCache.id && anthropicModelCache.expiresAt > now) {
+    return anthropicModelCache.id;
+  }
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/models?limit=100', {
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Anthropic models API returned ${response.status}`);
+    }
+
+    const body = await response.json();
+    const model = (body.data || []).find((item) => item.id?.startsWith('claude-sonnet-'))?.id;
+
+    if (!model) {
+      throw new Error('No Claude Sonnet model is available to this API key');
+    }
+
+    anthropicModelCache = {
+      id: model,
+      expiresAt: now + ANTHROPIC_MODEL_CACHE_MS,
+    };
+    console.log(`[startup] Anthropic model selected: ${model}`);
+    return model;
+  } catch (err) {
+    if (anthropicModelCache.id) {
+      console.error(`[nuggets-agent] Model refresh failed; keeping ${anthropicModelCache.id}:`, err.message);
+      return anthropicModelCache.id;
+    }
+
+    anthropicModelCache = {
+      id: ANTHROPIC_MODEL_FALLBACK,
+      expiresAt: now + (5 * 60 * 1000),
+    };
+    console.error(`[nuggets-agent] Model discovery failed; using ${ANTHROPIC_MODEL_FALLBACK}:`, err.message);
+    return ANTHROPIC_MODEL_FALLBACK;
+  }
+}
+
+async function createAnthropicMessage(params) {
+  const model = await discoverAnthropicModel();
+
+  try {
+    return await anthropic.messages.create({ ...params, model });
+  } catch (err) {
+    if (!ANTHROPIC_MODEL_OVERRIDE && err.status === 404) {
+      anthropicModelCache = { id: null, expiresAt: 0 };
+      const refreshedModel = await discoverAnthropicModel(true);
+
+      if (refreshedModel !== model) {
+        console.log(`[nuggets-agent] Retrying Anthropic request with ${refreshedModel}`);
+        return anthropic.messages.create({ ...params, model: refreshedModel });
+      }
+    }
+
+    throw err;
+  }
+}
 
 // ─── Notion content fetching ───────────────────────────────────────────────
 
@@ -804,8 +877,7 @@ async function generateDrafts(postIdea, systemPrompt, notionContext, customPromp
     }
   }
 
-  const message = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
+  const message = await createAnthropicMessage({
     max_tokens: 2000,
     system: systemPrompt,
     messages: [
@@ -823,8 +895,7 @@ async function generateDrafts(postIdea, systemPrompt, notionContext, customPromp
 
   // QA review pass - check for banned patterns and rewrite
   try {
-    const qaMessage = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+    const qaMessage = await createAnthropicMessage({
       max_tokens: 2000,
       system: QA_SYSTEM_PROMPT,
       messages: [
@@ -1143,14 +1214,51 @@ async function createAsanaTask(title, postDate, ordinalPostId) {
   return task.data.gid;
 }
 
+// ─── Core: approval ownership ───────────────────────────────────────────────
+
+function extractSubmitterUserId(message, fields = {}) {
+  const submitterFields = [
+    fields['submitted by'],
+    fields['requested by'],
+    fields.requester,
+    fields.submitter,
+  ].filter(Boolean);
+
+  for (const value of submitterFields) {
+    const match = String(value).match(/<@([UW][A-Z0-9]+)>/);
+    if (match) return match[1];
+  }
+
+  // Normal channel and DM messages carry the human sender directly.
+  if (message.user && !message.bot_id) return message.user;
+
+  // Workflow Builder messages are posted by a bot. If the workflow includes
+  // the submitter variable, Slack renders it as a user mention in the message.
+  const workflowText = `${message.text || ''}\n${JSON.stringify(message.blocks || [])}`;
+  const workflowMention = workflowText.match(/<@([UW][A-Z0-9]+)>/);
+  return workflowMention ? workflowMention[1] : null;
+}
+
+function canApproveDraft(approval, userId) {
+  return Boolean(
+    userId &&
+    (userId === REVIEWER_SLACK_ID || userId === approval.submitterUserId)
+  );
+}
+
+function findLatestPendingApproval(predicate) {
+  return Array.from(pendingApprovals.entries()).reverse().find((entry) => predicate(entry[1], entry[0])) || null;
+}
+
 // ─── Core: send DM to reviewer ──────────────────────────────────────────────
 
-async function sendReviewDM(notionUrl, originalMessage, originalChannelId, originalMessageTs, channelName, drafts) {
+async function sendReviewDM(notionUrl, originalMessage, originalChannelId, originalMessageTs, channelName, drafts, submitterUserId) {
   const preview = originalMessage.slice(0, 120) + (originalMessage.length > 120 ? '...' : '');
+  const submitterLine = submitterUserId ? `\n*Submitted by:* <@${submitterUserId}>` : '';
 
   const result = await slack.client.chat.postMessage({
     channel: REVIEWER_SLACK_ID,
-    text: `*New post idea ready for review* 👀\n\n*Original nugget:*\n> ${preview}\n\n*Drafts in Notion:* ${notionUrl}\n\nReply *approved* to this message to post the link back in #${channelName}.`,
+    text: `*New post idea ready for review* 👀${submitterLine}\n\n*Original nugget:*\n> ${preview}\n\n*Drafts in Notion:* ${notionUrl}\n\nReply *approved* to this message to post the link back in #${channelName}.`,
   });
 
   // Store state so we can act on the "approved" reply
@@ -1159,6 +1267,7 @@ async function sendReviewDM(notionUrl, originalMessage, originalChannelId, origi
     originalMessageTs,
     notionUrl,
     channelName,
+    submitterUserId,
     drafts,
     dmChannelId: result.channel,
   });
@@ -1196,6 +1305,7 @@ slack.event('message', async ({ event, client }) => {
   const fields = parseFormSubmission(message.text);
   const { prompt: formPrompt, allText, publishDate } = buildFormPrompt(fields);
   const imageFiles = getSlackFileIds(message);
+  const submitterUserId = extractSubmitterUserId(message, fields);
 
   try {
     // 1. Acknowledge
@@ -1248,7 +1358,15 @@ slack.event('message', async ({ event, client }) => {
     });
 
     // 6. DM reviewer
-    const dmTs = await sendReviewDM(notionUrl, originalSummary, message.channel, message.ts, channelName, drafts);
+    const dmTs = await sendReviewDM(
+      notionUrl,
+      originalSummary,
+      message.channel,
+      message.ts,
+      channelName,
+      drafts,
+      submitterUserId
+    );
     console.log(`[nuggets-agent] DM sent to reviewer.`);
 
     // Store image URLs and publish date on the pending approval
@@ -1337,7 +1455,15 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
     });
 
     // 6. DM reviewer
-    const dmTs = await sendReviewDM(notionUrl, postIdea, message.channel, message.ts, channelName, drafts);
+    const dmTs = await sendReviewDM(
+      notionUrl,
+      postIdea,
+      message.channel,
+      message.ts,
+      channelName,
+      drafts,
+      message.user
+    );
     console.log(`[nuggets-agent] DM sent to reviewer.`);
 
     // 7. Map the follow-up message for thumbs-up reaction matching
@@ -1369,6 +1495,32 @@ slack.message(async ({ message, client }) => {
 
   // Skip if it looks like a short conversational reply, not revision feedback
   const lower = feedback.toLowerCase();
+
+  if (lower === 'approved' || lower === 'approve') {
+    const pendingEntry = findLatestPendingApproval((approval) => (
+      approval.originalChannelId === message.channel &&
+      approval.originalMessageTs === message.thread_ts
+    ));
+
+    if (pendingEntry && canApproveDraft(pendingEntry[1], message.user)) {
+      const [approvalKey, approval] = pendingEntry;
+      return handleApproval({
+        channel: approval.dmChannelId,
+        thread_ts: approvalKey,
+        user: message.user,
+      }, client);
+    }
+
+    if (pendingEntry) {
+      await client.chat.postMessage({
+        channel: message.channel,
+        thread_ts: message.thread_ts,
+        text: 'Only the person who submitted this draft or Jess can approve it.',
+      });
+      return;
+    }
+  }
+
   if (['thanks', 'thank you', 'ok', 'got it', 'sounds good', 'nice', 'cool', 'lol', 'haha', 'yes', 'no', 'yep', 'nope', 'agreed', 'perfect'].includes(lower)) return;
 
   console.log(`[nuggets-agent] Thread revision request: "${feedback.slice(0, 80)}..."`);
@@ -1500,9 +1652,38 @@ slack.message(async ({ message, client }) => {
   if (!text) return;
   const lower = text.toLowerCase();
 
-  // If this is the reviewer saying "approved", handle that
-  if (message.user === REVIEWER_SLACK_ID && lower.includes('approved')) {
-    return handleApproval(message, client);
+  // The reviewer can approve any draft. Submitters can approve their own.
+  if (lower === 'approved' || lower === 'approve') {
+    let pendingEntry = null;
+
+    if (message.thread_ts && pendingApprovals.has(message.thread_ts)) {
+      pendingEntry = [message.thread_ts, pendingApprovals.get(message.thread_ts)];
+    } else {
+      pendingEntry = findLatestPendingApproval((approval) => (
+        approval.dmChannelId === message.channel ||
+        (
+          approval.submitterUserId === message.user &&
+          approval.originalChannelId === message.channel
+        )
+      ));
+    }
+
+    if (pendingEntry && canApproveDraft(pendingEntry[1], message.user)) {
+      const [approvalKey, approval] = pendingEntry;
+      return handleApproval({
+        channel: approval.dmChannelId,
+        thread_ts: approvalKey,
+        user: message.user,
+      }, client);
+    }
+
+    await client.chat.postMessage({
+      channel: message.channel,
+      text: pendingEntry
+        ? 'Only the person who submitted this draft or Jess can approve it.'
+        : 'I could not find a pending draft for you to approve.',
+    });
+    return;
   }
 
   const userId = message.user;
@@ -1570,8 +1751,7 @@ slack.message(async ({ message, client }) => {
       const memoryContext = getMemoryContext();
       const sysPrompt = EDNA_CHAT_SYSTEM_PROMPT + memoryContext + docsContext;
 
-      const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+      const response = await createAnthropicMessage({
         max_tokens: 1000,
         system: sysPrompt,
         messages: session.history,
@@ -1687,9 +1867,9 @@ slack.message(async ({ message, client }) => {
       const notionUrl = await appendToNotionPage(drafts.title, drafts.linkedin_post, drafts.blog_draft, postIdea, DM_NOTION_PAGE_ID);
       console.log(`[nuggets-agent] Notion page updated: ${notionUrl}`);
 
-      await client.chat.postMessage({
+      const submitterDraftMessage = await client.chat.postMessage({
         channel: message.channel,
-        text: `Drafts are ready: ${notionUrl}\n\nWant to draft another? Send me another idea, or type "reset" to start over.`,
+        text: `Drafts are ready: ${notionUrl}\n\nReply *approved* or add a 👍 to this message to approve this draft. Send another idea to keep drafting in the same voice, or type "reset" to start over.`,
       });
 
       // DM reviewer
@@ -1708,6 +1888,9 @@ slack.message(async ({ message, client }) => {
         drafts,
         dmChannelId: result.channel,
       });
+
+      reactionApprovalMap.set(`${message.channel}:${submitterDraftMessage.ts}`, result.ts);
+      reactionApprovalMap.set(`${message.channel}:${message.ts}`, result.ts);
       saveState();
 
       // Stay in awaiting_idea so they can draft another with same voice
@@ -1739,8 +1922,7 @@ slack.message(async ({ message, client }) => {
       // Add to conversation history
       session.history.push({ role: 'user', content: text });
 
-      const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+      const response = await createAnthropicMessage({
         max_tokens: 1000,
         system: BRAINSTORM_SYSTEM_PROMPT + getMemoryContext(),
         messages: session.history,
@@ -1771,23 +1953,27 @@ slack.message(async ({ message, client }) => {
   }
 });
 
-// ─── Slack event: thumbs-up reaction from reviewer ────────────────────────
+// ─── Slack event: thumbs-up approval ──────────────────────────────────────
 
 slack.event('reaction_added', async ({ event, client }) => {
-  if (event.user !== REVIEWER_SLACK_ID) return;
   if (event.reaction !== '+1' && event.reaction !== 'thumbsup') return;
 
   const key = `${event.item.channel}:${event.item.ts}`;
   const dmTs = reactionApprovalMap.get(key);
   if (!dmTs || !pendingApprovals.has(dmTs)) return;
 
-  console.log(`[nuggets-agent] Thumbs-up approval from reviewer on ${key}`);
-
   const approval = pendingApprovals.get(dmTs);
+  if (!canApproveDraft(approval, event.user)) {
+    console.log(`[nuggets-agent] Ignored unauthorized thumbs-up approval from ${event.user} on ${key}`);
+    return;
+  }
+
+  console.log(`[nuggets-agent] Thumbs-up approval from ${event.user} on ${key}`);
+
   const fakeMessage = {
     channel: approval.dmChannelId,
     thread_ts: dmTs,
-    user: REVIEWER_SLACK_ID,
+    user: event.user,
   };
 
   await handleApproval(fakeMessage, client);
@@ -1818,6 +2004,11 @@ async function handleApproval(message, client) {
 
   if (!approval) {
     console.log('[nuggets-agent] Received "approved" but no matching pending approval found.');
+    return;
+  }
+
+  if (!canApproveDraft(approval, message.user)) {
+    console.log(`[nuggets-agent] Ignored unauthorized approval from ${message.user || 'unknown user'}.`);
     return;
   }
 
@@ -2029,8 +2220,7 @@ async function sendDailyIdeas() {
       prompt += `\nRECENT AIROPS PRODUCT CONTEXT:\n${docsContext}`;
     }
 
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+    const response = await createAnthropicMessage({
       max_tokens: 1500,
       system: DAILY_IDEAS_PROMPT + getMemoryContext(),
       messages: [{ role: 'user', content: prompt }],
@@ -2110,6 +2300,7 @@ process.on('unhandledRejection', (err) => {
 // ─── Start ──────────────────────────────────────────────────────────────────
 
 (async () => {
+  await discoverAnthropicModel();
   await slack.start();
   scheduleDailyIdeas();
   console.log('⚡ Nuggets agent is running');

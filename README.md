@@ -4,21 +4,75 @@ Slack bot that drafts LinkedIn posts in multiple brand voices, runs QA against t
 
 ## What Edna Does
 
-1. Watches `#social-workflow` and `#0-nuggets` for post ideas
-2. Accepts structured requests via Slack Workflow Builder form
-3. Accepts DMs from anyone (with voice picker and brainstorm mode)
-4. Generates LinkedIn post + blog draft using the selected brand voice
-5. Runs QA review to catch banned patterns and AI tropes
-6. Saves drafts to Notion as toggle headings
-7. DMs Jess for review
-8. On approval (thumbs-up or "approved" reply):
-   - Re-reads Notion to pick up manual edits
-   - Queues the LinkedIn post in Ordinal (AirOps brand profile)
-   - Uploads attached images to Ordinal
-   - Creates an Asana task on Social & Email Board
-   - Assigns a blocking approval to Jess in Ordinal
-9. Sends daily post ideas at 9am CT informed by Google News RSS
-10. Learns from approved posts and QA fixes via long-term memory
+Edna works in Slack workflow channels, in DMs, and through scheduled background workflows.
+
+### In Slack workflow channels
+
+Edna watches the channels listed in `WATCH_CHANNELS`. The documented setup uses `#social-workflow` and `#0-nuggets`.
+
+1. **Accepts content requests**
+   - Processes the Slack Workflow Builder form marked **Social Post Request**
+   - Responds to regular channel messages containing “post idea,” including variants such as `post-idea` and `#post-idea`
+2. **Builds the brief**
+   - Reads the topic, post type, context, audience, Notion link, image notes, attached images, and preferred publish date from the form
+   - Pulls accessible Notion pages into the working context
+   - Uses the voice and Notion destination configured for the channel
+3. **Creates and reviews the copy**
+   - Generates a LinkedIn post and companion blog draft
+   - Runs a second QA pass for banned patterns, weak phrasing, and AI writing tropes
+   - Saves the result to the channel's configured Notion page
+4. **Collaborates in the request thread**
+   - Posts the Notion link in the original Slack thread
+   - Accepts revision feedback in that thread
+   - Can use accessible Notion links and public web URLs included in revision feedback as context
+5. **Routes and approves the draft**
+   - DMs Jess with the draft and review link
+   - Lets the original submitter approve their own draft with 👍 or an `approved` reply
+   - Lets Jess approve any pending draft
+6. **Hands off approved content**
+   - Re-reads Notion so manual edits are included
+   - Uploads attached images and queues the LinkedIn post in Ordinal
+   - Assigns a blocking Ordinal approval to Jess
+   - Creates a task on the Social & Email Board in Asana
+
+For Workflow Builder requests, the generated Slack message must include the submitter as a Slack user mention so Edna can identify who owns—and may approve—the draft.
+
+### In DMs
+
+Anyone in the workspace can DM Edna.
+
+- **Draft a post** — Type `draft`, choose AirOps Brand, Alex Halliday, Christy Roach, or Matt Hammel, then send the idea and any relevant Notion link.
+- **Approve your draft** — Reply `approved` or add 👍 to Edna's draft-ready message. A submitter can approve only their own drafts; Jess can approve any draft.
+- **Brainstorm** — Type `brainstorm` to develop concrete hooks and angles, then type `draft` when an idea is ready.
+- **Chat** — Ask about Edna, content strategy, LinkedIn best practices, the AirOps brand kit, or supported AirOps product topics.
+- **Start over** — Use `reset`, `start over`, or `menu` to clear the current DM session. Use `help` to see the available modes.
+
+DM drafts are saved to the DM Notion destination and use the same Ordinal handoff as channel drafts. Edna re-reads Notion during approval, so manual edits are included.
+
+### In general
+
+Edna can:
+
+- Write in four defined brand and executive voices
+- Turn rough ideas or structured briefs into LinkedIn posts and companion blog drafts
+- Use accessible Notion pages, selected public web pages, AirOps docs, and recent news as context
+- Apply a dedicated QA pass and remember recurring QA fixes
+- Automatically select the newest Claude Sonnet model available to the configured Anthropic API key, refreshing every six hours
+- Learn patterns from approved posts through persistent long-term memory
+- Send Jess five daily post ideas at 9:00 a.m. CT, informed by recent Google News headlines and AirOps product context
+- Preserve pending approvals across Railway restarts
+- Notify Jess in Slack when the service catches an unexpected error
+
+### What Edna cannot do
+
+- **She does not monitor every Slack channel.** Channel behavior is limited to `WATCH_CHANNELS`, and regular channel messages must include “post idea” to trigger drafting.
+- **She does not publish independently.** Edna queues copy in Ordinal and creates a blocking approval; final publishing controls remain in Ordinal.
+- **She cannot approve someone else's draft on their behalf.** A draft can be approved by its submitter or by Jess.
+- **She does not guarantee factual accuracy.** Generated claims, dates, links, and product details still require human review.
+- **She cannot access every link.** Notion pages must be shared with the integration, and external pages must be publicly retrievable.
+- **She is not a general-purpose workflow bot.** Her connected actions are limited to this social-content workflow across Slack, Notion, Ordinal, and Asana.
+- **DMs do not support the full channel form workflow.** Preferred publish dates and attached-image handling belong in the Slack workflow form. Edit a DM draft in Notion or submit a new draft request.
+- **Active DM conversation history does not survive a Railway restart.** Pending approvals and long-term memory do persist.
 
 ---
 
@@ -33,20 +87,11 @@ Slack bot that drafts LinkedIn posts in multiple brand voices, runs QA against t
 
 ---
 
-## DM Features
-
-- **Draft a post** — pick a voice, give an idea, get a draft
-- **Brainstorm** — free-form ideation with Edna using AirOps content pillars
-- **Chat** — ask Edna anything (how she was built, trends, AirOps product questions)
-- **Thread revisions** — reply to a draft thread with feedback or URLs to iterate
-- Commands: `draft`, `brainstorm`, `reset`, `menu`, `help`
-
----
-
 ## Workflow Form Fields
 
 | Field | Required | Description |
 |-------|----------|-------------|
+| Submitted by | Yes for self-approval | Slack user mention used to identify the draft owner |
 | What is the post's topic | Yes | Short description |
 | Post type | No | Product launch, Research/data, Event, Thought leadership, Customer story, Cultural/team |
 | Context / brief | No | Background, talking points, data |
@@ -91,6 +136,7 @@ Enable Socket Mode and generate an App-Level Token with `connections:write` scop
 | `SLACK_APP_TOKEN` | Slack app-level token for Socket Mode (`xapp-...`) |
 | `NOTION_TOKEN` | Notion integration token |
 | `ANTHROPIC_API_KEY` | Claude API key |
+| `ANTHROPIC_MODEL` | Optional model override; leave unset to auto-select the newest available Claude Sonnet model |
 | `WATCH_CHANNELS` | Comma-separated channel names (`0-nuggets,social-workflow`) |
 | `CHANNEL_NOTION_MAP` | Channel-to-Notion-page mapping (`social-workflow:33b1f419...`) |
 | `CHANNEL_PROMPT_MAP` | Channel-to-voice mapping (`social-workflow:airops`) |
