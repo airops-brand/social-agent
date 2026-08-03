@@ -31,6 +31,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { OrdinalMcpIntegration } = require('./ordinal-mcp');
 const { findHeadingBlockId, notionBlockUrl } = require('./notion-links');
 const { postSignedOrdinalUpload } = require('./ordinal-upload');
+const { removeHashtags } = require('./draft-cleanup');
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
@@ -706,10 +707,10 @@ Don't: "We're excited to announce our groundbreaking new research!" / "In today'
 LINKEDIN-SPECIFIC WRITING RULES:
 1. Hook line must be 1-2 sentences max and stand alone before "see more." Write it first. If it doesn't compel a click without context, rewrite it.
 2. Never put the URL in the post body. Always in the first comment. Reference as "Link in comments."
-3. Sentence case throughout all post copy and hashtags. Never title case.
+3. Sentence case throughout all post copy. Never title case.
 4. No em dashes. Use a period or a line break instead.
 5. Emojis are chapter markers, not decoration. Max 3-4 per post. Preferred: ↓ → ✦ 📊 🔍 📍 📅. Never: 🙌 💪 🚀 or emoji strings.
-6. Hashtags: 3-5 max, placed at the end. Preferred: #ContentEngineering #AEO #AISearch #ContentMarketing #SEO
+6. Do not use hashtags. Never append a hashtag line or turn category terms into hashtags.
 7. Never use "BREAKING //", "NEW //", "JUST DROPPED", or "TLDR;" as openers.
 8. Never use contrast/pivot constructions. Banned: "The [group] pulling ahead are...", "This isn't X. It's Y.", "[Noun] is table stakes. [Other noun] is the advantage.", "Most [group] are doing X. The ones winning are doing Y." State claims directly.
 9. Never open posts or comments with affirmation: "Love this", "Great point", "So important", "100%". Start with substance.
@@ -884,6 +885,9 @@ Replace with "AEO"
 PATTERN 8 — EXCLAMATION POINTS:
 Remove unless genuinely celebratory (rare).
 
+PATTERN 9 — HASHTAGS:
+Remove every hashtag. Never add a hashtag line to a post draft.
+
 Return valid JSON:
 {
   "linkedin_post": "the cleaned post",
@@ -938,7 +942,7 @@ async function generateDrafts(postIdea, systemPrompt, notionContext, customPromp
   const drafts = await createAnthropicJson({
     label: 'Draft generation',
     max_tokens: STRUCTURED_OUTPUT_MAX_TOKENS,
-    system: systemPrompt,
+    system: `${systemPrompt}\n\nGLOBAL DRAFT RULE: Do not include hashtags in any post draft. Never append a hashtag line.`,
     messages: [
       {
         role: 'user',
@@ -982,6 +986,10 @@ async function generateDrafts(postIdea, systemPrompt, notionContext, customPromp
   } catch (err) {
     console.error('[nuggets-agent] QA review failed (using original draft):', err.message);
   }
+
+  // Deterministic safeguard: prompts and QA should prevent hashtags, but no
+  // generated draft leaves Edna with one even if the model ignores the rule.
+  drafts.linkedin_post = removeHashtags(drafts.linkedin_post);
 
   return drafts;
 }
@@ -1632,6 +1640,7 @@ You know organic and paid social strategy for LinkedIn, X, Instagram, Facebook, 
 Universal principles:
 - Start with the business goal, target audience, and intended action. Optimize for the metric that matches the goal, not vanity engagement.
 - Earn attention immediately. Deliver one clear idea, concrete value, credible proof, and one proportionate call to action.
+- Do not include hashtags in post drafts for any platform.
 - Match the platform's native creative language. Adapt the hook, structure, media, pacing, and CTA instead of copying and pasting.
 - Use accessible creative: captions for video, legible on-screen text, useful alt text, and key information that does not depend on sound alone.
 - Treat replies and community management as part of distribution. Test hooks, formats, and creative variants, then learn from retention, saves, shares, qualified engagement, traffic, and conversion.
@@ -1645,7 +1654,7 @@ B2B principles:
 
 Platform playbooks:
 - LinkedIn: professional relevance, expert POV, specific evidence, strong opening lines, readable spacing, useful documents or native video, and substantive conversation. Optimize B2B content for trust, saves, shares, and qualified discussion. Avoid engagement bait and empty corporate announcements.
-- X: concise, conversational, timely, and responsive. Lead with the point, use media when it adds information, use threads only when the idea needs them, avoid hashtag stuffing, and participate in live category conversations with speed and context.
+- X: concise, conversational, timely, and responsive. Lead with the point, use media when it adds information, use threads only when the idea needs them, and participate in live category conversations with speed and context.
 - Instagram: visual-first storytelling. Use carousels for saveable education and Reels for discovery. Design mobile-first vertical video with a visual hook, captions, safe text placement, human presence, and a reason to save, share, or reply.
 - Facebook: community, context, and utility. Favor native posts, video/Reels, groups, events, customer stories, and prompts that invite genuine discussion. Make the value and audience clear, then manage comments and messages like customer experience.
 - TikTok: create TikTok-first, vertical, human video. Hook in the opening seconds, use sound and captions, show rather than announce, structure around problem, demonstration, proof, and action, and use trends only when the brand has a credible connection. Test multiple native variations and treat creators as creative partners.
