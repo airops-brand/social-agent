@@ -88,10 +88,12 @@ Edna's cross-platform guidance is grounded in durable B2B principles and the pla
 
 | Voice | Source | Used By |
 |-------|--------|---------|
-| AirOps Brand | Brand kit content type 23019 | `#social-workflow`, DMs (option 1) |
-| Alex Halliday (CEO) | Brand kit content type 23020 | `#0-nuggets`, DMs (option 2) |
-| Christy Roach (CMO) | Brand kit content type 26745 | DMs (option 3) |
-| Matt Hammel (COO) | Brand kit content type 23015 | DMs (option 4) |
+| AirOps Brand | Brand kit content type 23019 | Workflow `brand`, `#social-workflow`, DMs (option 1) |
+| Alex Halliday (CEO) | Brand kit content type 23020 | Workflow `alex`, `#0-nuggets`, DMs (option 2) |
+| Christy Roach (CMO) | Brand kit content type 26745 | Workflow `christy`, DMs (option 3) |
+| Matt Hammel (COO) | Brand kit content type 23015 | Workflow `matt`, DMs (option 4) |
+
+All four voice content types belong to AirOps Brand Kit `26564`. The workflow's voice selection overrides the channel default for the initial draft and any thread revisions.
 
 ---
 
@@ -100,6 +102,7 @@ Edna's cross-platform guidance is grounded in durable B2B principles and the pla
 | Field | Required | Description |
 |-------|----------|-------------|
 | Submitted by | Yes for self-approval | Slack user mention used to identify the draft owner |
+| Whose brand voice should this be in? | Yes | `alex`, `matt`, `christy`, or `brand`; maps to the corresponding content type in Brand Kit 26564 |
 | What is the post's topic | Yes | Short description |
 | Post type | No | Product launch, Research/data, Event, Thought leadership, Customer story, Cultural/team |
 | Context / brief | No | Background, talking points, data |

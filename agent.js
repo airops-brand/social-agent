@@ -40,6 +40,11 @@ const {
   threadIncludesEdna,
 } = require('./slack-thread-routing');
 const { extractWebUrls, fetchWebPageContext } = require('./web-context');
+const {
+  AIROPS_BRAND_KIT_ID,
+  VOICE_OPTIONS,
+  getFormVoiceKey,
+} = require('./brand-voices');
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
@@ -357,7 +362,7 @@ function parseFormSubmission(text) {
   return fields;
 }
 
-function buildFormPrompt(fields) {
+function buildFormPrompt(fields, voiceLabel = '') {
   const topic = fields["what is the post's topic"] || fields.topic || fields['post topic'] || '';
   const postType = fields['post type'] || fields.type || '';
   const context = fields['context / brief'] || fields.context || fields.brief || '';
@@ -371,6 +376,7 @@ function buildFormPrompt(fields) {
   if (context) prompt += `CONTEXT: ${context}\n`;
   if (audience) prompt += `TARGET AUDIENCE: ${audience}\n`;
   if (imageDesc) prompt += `IMAGE NOTES: ${imageDesc}\n`;
+  if (voiceLabel) prompt += `BRAND VOICE: ${voiceLabel}\n`;
 
   const publishDate = fields['preferred post date'] || fields['desired publish date'] || fields['post date'] || fields['date'] || '';
   if (publishDate) prompt += `PREFERRED POST DATE: ${publishDate}\n`;
@@ -486,14 +492,6 @@ const dmSessions = new Map();
 // Thread draft context: "channel:thread_ts" → { originalIdea, drafts, systemPrompt, channelName, notionContext }
 const threadDrafts = new Map();
 
-// Voice options with brand kit content type IDs
-const VOICE_OPTIONS = {
-  airops: { label: 'AirOps Brand', contentTypeId: 23019 },
-  alex: { label: 'Alex Halliday', contentTypeId: 23020 },
-  christy: { label: 'Christy Roach', contentTypeId: 26745 },
-  matt: { label: 'Matt Hammel', contentTypeId: 23015 },
-};
-
 // Cache for fetched voice prompts
 const voicePromptCache = {};
 
@@ -520,7 +518,7 @@ async function fetchVoicePrompt(voiceKey) {
         params: {
           name: 'get_brand_kit',
           arguments: {
-            id: 26564,
+            id: AIROPS_BRAND_KIT_ID,
             fields: ['content_types.id', 'content_types.name', 'content_types.template_outline'],
             includes: ['content_types'],
           },
@@ -935,11 +933,18 @@ Return only valid JSON, no markdown fences, no preamble.`;
 const SYSTEM_PROMPTS = {
   alex: ALEX_SYSTEM_PROMPT,
   airops: AIROPS_BRAND_SYSTEM_PROMPT,
+  christy: buildChristyPrompt(),
+  matt: buildMattPrompt(),
 };
 
 function getSystemPrompt(channelName) {
-  const key = CHANNEL_PROMPT_MAP[channelName] || 'alex';
+  const key = getChannelVoiceKey(channelName);
   return SYSTEM_PROMPTS[key] || ALEX_SYSTEM_PROMPT;
+}
+
+function getChannelVoiceKey(channelName) {
+  const key = CHANNEL_PROMPT_MAP[channelName] || 'alex';
+  return VOICE_OPTIONS[key] ? key : 'alex';
 }
 
 async function generateDrafts(postIdea, systemPrompt, notionContext, customPrompt) {
@@ -1345,7 +1350,10 @@ slack.event('message', async ({ event, client }) => {
   console.log(`[nuggets-agent] Form submission detected in #${channelName}`);
 
   const fields = parseFormSubmission(message.text);
-  const { prompt: formPrompt, allText, publishDate } = buildFormPrompt(fields);
+  const requestedVoiceKey = getFormVoiceKey(fields);
+  const voiceKey = requestedVoiceKey || getChannelVoiceKey(channelName);
+  const voice = VOICE_OPTIONS[voiceKey];
+  const { prompt: formPrompt, allText, publishDate } = buildFormPrompt(fields, voice.label);
   const imageFiles = getSlackFileIds(message);
   const submitterUserId = extractSubmitterUserId(message, fields);
 
@@ -1378,9 +1386,12 @@ slack.event('message', async ({ event, client }) => {
     notionContext.push(...await fetchLinkedWebContexts(allText));
 
     // 3. Generate drafts with structured form data
-    const systemPrompt = getSystemPrompt(channelName);
+    const systemPrompt = await fetchVoicePrompt(voiceKey) || getSystemPrompt(channelName);
     console.log(`[nuggets-agent] Form prompt:\n${formPrompt}`);
-    console.log(`[nuggets-agent] Using system prompt for: ${CHANNEL_PROMPT_MAP[channelName] || 'alex (default)'}`);
+    console.log(
+      `[nuggets-agent] Using ${voice.label} voice from brand kit ${voice.brandKitId}, content type ${voice.contentTypeId}`
+      + (requestedVoiceKey ? ' (workflow selection)' : ' (channel default)'),
+    );
     const drafts = await generateDrafts(message.text, systemPrompt, notionContext, formPrompt);
     console.log(`[nuggets-agent] Drafts generated. Title: "${drafts.title}"`);
 
@@ -1407,6 +1418,9 @@ slack.event('message', async ({ event, client }) => {
       systemPrompt,
       channelName,
       notionPageId: pageId,
+      voiceKey,
+      brandKitId: voice.brandKitId,
+      contentTypeId: voice.contentTypeId,
     });
 
     // 6. Store approval state. Only the form submitter can approve.
@@ -1421,6 +1435,9 @@ slack.event('message', async ({ event, client }) => {
       dmChannelId: message.channel,
       imageFiles,
       publishDate,
+      voiceKey,
+      brandKitId: voice.brandKitId,
+      contentTypeId: voice.contentTypeId,
     });
 
     // 7. Map for thumbs-up approval
@@ -1478,6 +1495,8 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
     }
 
     // 3. Generate drafts
+    const voiceKey = getChannelVoiceKey(channelName);
+    const voice = VOICE_OPTIONS[voiceKey];
     const systemPrompt = getSystemPrompt(channelName);
     const drafts = await generateDrafts(postIdea, systemPrompt, notionContext);
     console.log(`[nuggets-agent] Drafts generated. Title: "${drafts.title}"`);
@@ -1501,6 +1520,9 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
       systemPrompt,
       channelName,
       notionPageId: pageId,
+      voiceKey,
+      brandKitId: voice.brandKitId,
+      contentTypeId: voice.contentTypeId,
     });
 
     // 6. Store approval state. Only the message author can approve.
@@ -1513,6 +1535,9 @@ slack.message(POST_IDEA_REGEX, async ({ message, say, client }) => {
       submitterUserId: message.user,
       drafts,
       dmChannelId: message.channel,
+      voiceKey,
+      brandKitId: voice.brandKitId,
+      contentTypeId: voice.contentTypeId,
     });
 
     // 7. Map the follow-up message for thumbs-up reaction matching
@@ -1672,12 +1697,18 @@ slack.message(async ({ message, client }) => {
     ));
     if (persistedApproval) {
       const approval = persistedApproval[1];
+      const restoredSystemPrompt = approval.voiceKey
+        ? await fetchVoicePrompt(approval.voiceKey)
+        : null;
       draftCtx = {
         originalIdea: threadMessages[0]?.text || 'Slack thread draft request',
         drafts: approval.drafts,
-        systemPrompt: getSystemPrompt(approval.channelName || 'unknown'),
+        systemPrompt: restoredSystemPrompt || getSystemPrompt(approval.channelName || 'unknown'),
         channelName: approval.channelName || 'unknown',
         notionPageId: getNotionPageId(approval.channelName || 'unknown'),
+        voiceKey: approval.voiceKey || getChannelVoiceKey(approval.channelName || 'unknown'),
+        brandKitId: approval.brandKitId,
+        contentTypeId: approval.contentTypeId,
       };
       threadDrafts.set(threadKey, draftCtx);
     }
@@ -2109,6 +2140,9 @@ slack.message(async ({ message, client }) => {
         submitterUserId: userId,
         drafts,
         dmChannelId: message.channel,
+        voiceKey,
+        brandKitId: VOICE_OPTIONS[voiceKey].brandKitId,
+        contentTypeId: VOICE_OPTIONS[voiceKey].contentTypeId,
       });
 
       reactionApprovalMap.set(`${message.channel}:${submitterDraftMessage.ts}`, approvalKey);
