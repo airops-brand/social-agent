@@ -1144,7 +1144,7 @@ async function uploadToOrdinal(fileId) {
   // Step 5: Poll for completion
   for (let i = 0; i < 15; i++) {
     await new Promise((r) => setTimeout(r, 2000));
-    const status = await ordinalMcpCall('ordinal_get_upload', { id: uploadId });
+    const status = await ordinalMcpCall('ordinal_get_upload', { uploadId });
     console.log(`[nuggets-agent] Upload status: ${JSON.stringify(status)}`);
     if (status.assetId) return status.assetId;
     if (status.status === 'ready' && status.assetId) return status.assetId;
@@ -1184,7 +1184,9 @@ async function queueOrdinalPost(title, linkedinPost, assetIds, publishDate) {
   const args = {
     title,
     publishAt,
-    status: 'Finalized',
+    // Edna creates an Ordinal draft for the team to review. `Scheduled` would
+    // bypass that review state, and `Finalized` is not a valid MCP status.
+    status: 'ToDo',
     linkedIn: {
       profileId: ORDINAL_LINKEDIN_PROFILE_ID,
       copy: linkedinPost,
@@ -1192,7 +1194,7 @@ async function queueOrdinalPost(title, linkedinPost, assetIds, publishDate) {
   };
 
   if (assetIds && assetIds.length > 0) {
-    args.linkedIn.assetIds = assetIds;
+    args.linkedIn.assets = assetIds.map((assetId) => ({ assetId }));
   }
 
   const post = await ordinalMcpCall('ordinal_create_post', args);
