@@ -35,6 +35,7 @@ const { removeHashtags } = require('./draft-cleanup');
 const {
   cleanThreadRequest,
   formatThreadTranscript,
+  isApprovalRequest,
   isConversationalReply,
   isDirectedAtEdna,
   threadIncludesEdna,
@@ -1782,7 +1783,7 @@ slack.message(async ({ message, client }) => {
   if (!isDirectedAtEdna(message.text, ednaUserId)) return;
 
   const feedback = cleanThreadRequest(message.text, ednaUserId);
-  if (!feedback || isConversationalReply(feedback)) return;
+  if (!feedback) return;
 
   const threadKey = `${message.channel}:${message.thread_ts}`;
   let draftCtx = threadDrafts.get(threadKey) || null;
@@ -1816,9 +1817,7 @@ slack.message(async ({ message, client }) => {
   // For untracked threads, only respond when Edna has already participated.
   if (!draftCtx && !threadIncludesEdna(threadMessages, ednaUserId)) return;
 
-  const lower = feedback.toLowerCase();
-
-  if (lower === 'approved' || lower === 'approve') {
+  if (isApprovalRequest(feedback)) {
     const pendingEntry = findLatestPendingApproval((approval) => (
       approval.originalChannelId === message.channel &&
       approval.originalMessageTs === message.thread_ts
@@ -1842,6 +1841,8 @@ slack.message(async ({ message, client }) => {
       return;
     }
   }
+
+  if (isConversationalReply(feedback)) return;
 
   if (!draftCtx) {
     return handleGeneralThreadRequest({
@@ -1909,7 +1910,7 @@ slack.message(async ({ message, client }) => {
     draftCtx.drafts = revisedDrafts;
     threadDrafts.set(threadKey, draftCtx);
 
-    await client.chat.postMessage({
+    const revisedReadyMessage = await client.chat.postMessage({
       channel: message.channel,
       thread_ts: message.thread_ts,
       text: `Revised draft is ready: ${notionUrl}\n\nGive me a 👍 when approved, or reply again to revise further.`,
@@ -1920,6 +1921,7 @@ slack.message(async ({ message, client }) => {
       if (approval.originalChannelId === message.channel && approval.originalMessageTs === message.thread_ts) {
         approval.drafts = revisedDrafts;
         approval.notionUrl = notionUrl;
+        reactionApprovalMap.set(`${message.channel}:${revisedReadyMessage.ts}`, key);
         saveState();
         break;
       }
@@ -2396,7 +2398,10 @@ slack.event('reaction_added', async ({ event, client }) => {
 
   const key = `${event.item.channel}:${event.item.ts}`;
   const dmTs = reactionApprovalMap.get(key);
-  if (!dmTs || !pendingApprovals.has(dmTs)) return;
+  if (!dmTs || !pendingApprovals.has(dmTs)) {
+    console.log(`[nuggets-agent] Ignored thumbs-up with no pending approval mapping for ${key}`);
+    return;
+  }
 
   const approval = pendingApprovals.get(dmTs);
   if (!canApproveDraft(approval, event.user)) {
@@ -2412,9 +2417,11 @@ slack.event('reaction_added', async ({ event, client }) => {
     user: event.user,
   };
 
-  await handleApproval(fakeMessage, client);
-  reactionApprovalMap.delete(key);
-  saveState();
+  const ordinalQueued = await handleApproval(fakeMessage, client);
+  if (ordinalQueued) {
+    reactionApprovalMap.delete(key);
+    saveState();
+  }
 });
 
 // ─── Approval handler ─────────────────────────────────────────────────────
@@ -2440,12 +2447,12 @@ async function handleApproval(message, client) {
 
   if (!approval) {
     console.log('[nuggets-agent] Received "approved" but no matching pending approval found.');
-    return;
+    return false;
   }
 
   if (!canApproveDraft(approval, message.user)) {
     console.log(`[nuggets-agent] Ignored unauthorized approval from ${message.user || 'unknown user'}.`);
-    return;
+    return false;
   }
 
   try {
@@ -2561,8 +2568,10 @@ async function handleApproval(message, client) {
       }
     }
     saveState();
+    return ordinalQueued;
   } catch (err) {
     console.error('[nuggets-agent] Error posting approved link:', err);
+    return false;
   }
 }
 

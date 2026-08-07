@@ -27,6 +27,19 @@ function isConversationalReply(text) {
   return CONVERSATIONAL_REPLIES.has(String(text || '').trim().toLowerCase());
 }
 
+function isApprovalRequest(text) {
+  const value = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]+$/g, '');
+
+  return value === 'approve'
+    || value === 'approved'
+    || /\bgood to go\b/.test(value)
+    || /\bready to (?:publish|schedule|queue)\b/.test(value)
+    || /\b(?:schedule|queue|push|send)\b[\s\S]*\b(?:to|in) ordinal\b/.test(value);
+}
+
 function isDirectedAtEdna(text, ednaUserId) {
   const mentions = Array.from(String(text || '').matchAll(/<@([UW][A-Z0-9]+)>/g), (match) => match[1]);
   return mentions.length === 0 || Boolean(ednaUserId && mentions.includes(ednaUserId));
@@ -50,6 +63,7 @@ function formatThreadTranscript(messages, ednaUserId) {
 module.exports = {
   cleanThreadRequest,
   formatThreadTranscript,
+  isApprovalRequest,
   isConversationalReply,
   isDirectedAtEdna,
   threadIncludesEdna,
